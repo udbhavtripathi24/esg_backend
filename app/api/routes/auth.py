@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session, select
 from app.db.session import get_session
-from app.models.user import User, UserCreate, UserRead
+from app.models.user import User, UserCreate, UserRead, UserWithPermissions
+from app.rbac.service import get_user_permissions
 from app.core.security import hash_password, verify_password, create_access_token
 from app.api.deps import get_current_user
 
@@ -43,13 +44,18 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), session: Session = D
         raise HTTPException(status_code=403, detail="Account is inactive")
 
     token = create_access_token({"sub": str(user.id), "portal_type": user.portal_type, "role": user.role})
+    permissions = sorted(get_user_permissions(session, user.id, user.company_id))
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": UserRead.model_validate(user),
+        "user": UserWithPermissions(**user.model_dump(), permissions=permissions),
     }
 
 
-@router.get("/me", response_model=UserRead)
-def read_me(current_user: User = Depends(get_current_user)):
-    return current_user
+@router.get("/me", response_model=UserWithPermissions)
+def read_me(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    permissions = sorted(get_user_permissions(session, current_user.id, current_user.company_id))
+    return UserWithPermissions(**current_user.model_dump(), permissions=permissions)

@@ -44,6 +44,20 @@ class UserRead(UserBase):
     # NOTE: hashed_password intentionally excluded from all read schemas.
 
 
+class UserWithPermissions(UserRead):
+    """UserRead + the caller's resolved RBAC permission codes.
+
+    Used ONLY by /auth/login and /auth/me. Deliberately NOT merged into
+    UserRead itself, since UserRead is the response model for general user
+    CRUD (e.g. GET /users/{id}) where returning one user's permissions in
+    the context of another user's request would be meaningless/misleading.
+    `role` is still present (inherited from UserBase) as a display hint only
+    — see the note on User.role. Authorization must use `permissions`, never
+    `role`.
+    """
+    permissions: list[str]
+
+
 class UserUpdate(SQLModel):
     name: Optional[str] = None
     department: Optional[str] = None

@@ -1,5 +1,7 @@
 """User CRUD, password hashing, role assignment, tenant + security tests."""
+from sqlmodel import select
 from tests.conftest_helpers import bootstrap, make_company, make_user, auth
+from app.models.rbac import Role, UserRole
 
 
 def test_create_user_hashes_password_and_hides_hash(client, session):
@@ -49,6 +51,59 @@ def test_client_admin_creates_user_only_in_own_company(client, session):
     }, headers=auth(cadmin))
     assert r.status_code == 201
     assert r.json()["company_id"] == a.id  # forced to own company, NOT b
+
+
+def test_deloitte_user_creation_stamps_organization_and_stays_visible(client, session):
+    """Regression test for a confirmed bug: creating a Deloitte user via
+    POST /users left organization_id NULL, making the new user invisible
+    in the creator's own GET /users list immediately after creation
+    (traced to _visible_user_filter's org-admin branch requiring
+    organization_id == actor.organization_id OR company_id IS NOT NULL).
+    """
+    org = bootstrap(session)
+    admin = make_user(session, "orgtest@deloitte.com", "deloitte", "Administrator", org=org)
+
+    r = client.post("/api/v1/users", json={
+        "name": "New Hire", "email": "newhire@deloitte.com", "portal_type": "deloitte",
+        "role": "Support", "password": "x", "role_code": "Support",
+    }, headers=auth(admin))
+    assert r.status_code == 201
+    body = r.json()
+
+    # 1-3: organization_id inherited, portal_type correct
+    assert body["organization_id"] == org.id
+    assert body["portal_type"] == "deloitte"
+
+    # 4: UserRole/RBAC assignment created correctly (pre-existing behavior,
+    # re-asserted here since this test also guards the fix didn't disturb it)
+    role = session.exec(select(Role).where(Role.code == "Support")).first()
+    assignment = session.exec(select(UserRole).where(
+        UserRole.user_id == body["id"], UserRole.role_id == role.id
+    )).first()
+    assert assignment is not None
+
+    # 5: the actual real-world symptom — visible in the creator's own list
+    listed = client.get("/api/v1/users", headers=auth(admin)).json()
+    assert any(u["email"] == "newhire@deloitte.com" for u in listed["items"])
+
+
+def test_client_user_creation_organization_id_unchanged_by_fix(client, session):
+    """Guards that the Deloitte-user fix does NOT affect client-portal
+    creation: a Deloitte actor creating a client user must still get
+    organization_id left unset (client identity is company_id-based,
+    per the Organization model's own docstring)."""
+    org = bootstrap(session)
+    admin = make_user(session, "orgtest2@deloitte.com", "deloitte", "Administrator", org=org)
+    co = make_company(session, org, "OrgTestCo")
+
+    r = client.post("/api/v1/users", json={
+        "name": "Client Person", "email": "clientperson@orgtestco.com", "portal_type": "client",
+        "role": "Client Uploader", "company_id": co.id, "password": "x",
+        "role_code": "Client Uploader",
+    }, headers=auth(admin))
+    assert r.status_code == 201
+    assert r.json()["organization_id"] is None
+    assert r.json()["company_id"] == co.id
 
 
 def test_deactivate_user_soft_delete(client, session):

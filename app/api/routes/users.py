@@ -92,6 +92,17 @@ def create_user(
             ids = accessible_company_ids(session, actor)
             if ids is not None and data["company_id"] not in ids:
                 raise NotFoundError("Company not found")
+        # Deloitte-side users are organization-scoped (see Organization model
+        # docstring: "consultants are organization users, company_id NULL").
+        # Stamp organization_id from the creating actor so the new user
+        # remains visible via _visible_user_filter's org-admin branch.
+        # Scoped specifically to the NEW user's portal_type being 'deloitte'
+        # (not unconditional in this else branch), so a Deloitte actor
+        # creating a client-portal user is unaffected — client users are
+        # identified by company_id, not organization_id, per the same
+        # docstring, and that behavior is untouched here.
+        if data.get("portal_type") == "deloitte":
+            data["organization_id"] = actor.organization_id
 
     user = User(**data, hashed_password=hash_password(user_in.password))
     session.add(user)

@@ -16,6 +16,7 @@ from app.core.pagination import Page, paginate_params
 from app.core.tenancy import can_access_company
 from app.models.user import User
 from app.models.dataset import Dataset, DatasetVersion
+from app.models.kpi import KpiValue
 from app.models.review import Review, ReviewComment
 from app.models.notification import Notification
 from app.services.review_service import assign_reviewer, record_decision
@@ -81,6 +82,106 @@ def _find_dataset_and_version(session, actor, ds_pid, v_pid):
     if is_reviewer:
         return ds, v
     raise NotFoundError("Dataset not found")
+
+
+# ---------- Data Preview / Validation (Review Center, backed by Layer 1) ----------
+
+class ValidationFinding(BaseModel):
+    severity: str  # 'error' | 'warning' -- see ValidationResult docstring
+    code: str
+    message: str
+    kpi_value_public_id: Optional[str] = None
+
+
+class ValidationResult(BaseModel):
+    is_available: bool
+    errors: list[ValidationFinding]
+    warnings: list[ValidationFinding]
+
+
+@reviews_router.get(
+    "/datasets/{ds_pid}/versions/{v_pid}/kpi-validation",
+    response_model=ValidationResult,
+)
+def get_kpi_validation(
+    ds_pid: str, v_pid: str,
+    session: Session = Depends(get_session),
+    actor: User = Depends(require_permission("dataset:read")),
+):
+    """PROVISIONAL v1 structural/data-quality validation ONLY.
+
+    Deliberately, structurally limited to checks computable from data
+    already stored in Layer 1's KpiValue rows -- no emission factors, no
+    unit conversion, no ESG scoring, no benchmarking, no framework
+    compliance checking. Every check here is a pure data-integrity/
+    sanity check any structured-data system would apply, independent of
+    what the numbers actually mean.
+
+    ERRORS (severity="error") are reserved for findings that mean the
+    data is not physically/structurally valid regardless of methodology
+    (e.g. a negative quantity for something that can't be negative).
+    WARNINGS (severity="warning") flag data-completeness concerns that
+    don't invalidate the submission but are worth a reviewer's attention
+    (missing site match, missing unit, a metric reported twice for the
+    same site).
+
+    is_available=False means no KpiValue rows exist yet for this version
+    at all -- either it hasn't been approved/extracted yet, or the
+    upload_type has no KPI mapping (see kpi_extraction_service.py). This
+    is NOT itself an error; the frontend should show an honest
+    "not yet available" state, not a validation failure.
+    """
+    ds, v = _find_dataset_and_version(session, actor, ds_pid, v_pid)
+
+    values = session.exec(select(KpiValue).where(KpiValue.dataset_version_id == v.id)).all()
+    if not values:
+        return ValidationResult(is_available=False, errors=[], warnings=[])
+
+    errors: list[ValidationFinding] = []
+    warnings: list[ValidationFinding] = []
+
+    for kv in values:
+        # ERROR: a negative measurement. Every currently-seeded KPI code
+        # (consumption, withdrawal, recycled, activity data, generated) is
+        # a physical quantity that cannot be negative in the real world —
+        # this is a structural sanity check, not a domain-specific rule.
+        if kv.value < 0:
+            errors.append(ValidationFinding(
+                severity="error", code="negative_value",
+                message=f"{kv.kpi_code} has a negative value ({kv.value}), which is not valid for this measurement.",
+                kpi_value_public_id=kv.public_id,
+            ))
+        # WARNING: couldn't resolve a registered site for this row.
+        if kv.site_id is None:
+            warnings.append(ValidationFinding(
+                severity="warning", code="unresolved_site",
+                message=f"{kv.kpi_code} could not be matched to a registered site.",
+                kpi_value_public_id=kv.public_id,
+            ))
+        # WARNING: no unit was found in the source file for this row.
+        if kv.unit == "unspecified":
+            warnings.append(ValidationFinding(
+                severity="warning", code="missing_unit",
+                message=f"{kv.kpi_code} has no specified unit.",
+                kpi_value_public_id=kv.public_id,
+            ))
+
+    # WARNING: the same (site, metric) reported more than once in this
+    # version — could indicate accidental double-counting in the source
+    # file. Purely structural (a duplicate-key observation), not a
+    # judgment about which value is "correct".
+    seen: dict[tuple, bool] = {}
+    for kv in values:
+        key = (kv.site_id, kv.kpi_code)
+        if key in seen:
+            warnings.append(ValidationFinding(
+                severity="warning", code="duplicate_metric",
+                message=f"{kv.kpi_code} was reported more than once for the same site in this submission.",
+                kpi_value_public_id=kv.public_id,
+            ))
+        seen[key] = True
+
+    return ValidationResult(is_available=True, errors=errors, warnings=warnings)
 
 
 @reviews_router.post(

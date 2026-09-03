@@ -66,15 +66,27 @@ def _verify_checksum(session: Session, job: ProcessingJob) -> None:
 
 @register("recalculate_kpi_values")
 def _recalc_kpi_values(session: Session, job: ProcessingJob) -> None:
-    """STUB — real KPI calculation plugs in later when formulas arrive.
+    """Real Layer 1 extraction — reads the approved dataset version's data
+    file(s) and writes raw, as-reported KpiValue rows.
 
-    Stage 5 only needs the trigger to fire and the job to complete. When the
-    KPI catalogue is delivered, this function reads the approved dataset,
-    resolves the KPI definitions + emission factors (both versioned), runs
-    the pure-function calculators, and writes rows to kpi_values with full
-    provenance (formula version + factor versions + input dataset version).
+    NOTE on scope: this remains the same trigger point already established
+    in Stage 5 (enqueued only on review approval — see
+    app/services/review_service.py's record_decision). What changed is
+    the body: it now does real extraction instead of only logging. Real
+    KPI *calculation* (applying emission factors, computing scores) is
+    still explicitly NOT here — see app/models/kpi.py and
+    app/services/kpi_extraction_service.py for the full boundary
+    rationale. This function only extracts what was actually reported.
     """
-    log.info(f"stub: would recalculate KPI values for dataset_version_id={job.subject_id}")
+    from app.services.kpi_extraction_service import extract_kpi_values_for_version, ExtractionError
+    try:
+        result = extract_kpi_values_for_version(session, job.subject_id, job_id=job.id)
+        log.info(f"kpi extraction for dataset_version_id={job.subject_id}: {result}")
+    except ExtractionError as e:
+        # Re-raise so the existing job-retry/dead-letter machinery in
+        # process_one() handles it exactly like any other job failure —
+        # no new failure-handling path invented here.
+        raise RuntimeError(str(e))
 
 @register("extract_file_metadata")
 def _extract_metadata(session: Session, job: ProcessingJob) -> None:

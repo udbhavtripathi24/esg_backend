@@ -38,6 +38,7 @@ def list_roles(
 from pydantic import BaseModel
 from app.models.rbac import UserRole
 from app.models.user import User as _User
+from app.models.company import Company
 from app.api.deps import require_permission
 from app.core.errors import NotFoundError, AppError
 
@@ -51,7 +52,7 @@ class AssignRoleBody(BaseModel):
 @router.post("/assign", status_code=201)
 def assign_role(
     body: AssignRoleBody,
-    _actor: _User = Depends(require_permission("user:manage")),
+    actor: _User = Depends(require_permission("user:manage")),
     session: Session = Depends(get_session),
 ):
     user = session.get(_User, body.user_id)
@@ -60,6 +61,18 @@ def assign_role(
     role = session.exec(select(Role).where(Role.code == body.role_code)).first()
     if not role:
         raise AppError("invalid_role", f"Unknown role: {body.role_code}", 422, "role_code")
+    # Approved fix: reject a company_id outside the actor's own organization.
+    # Mirrors the identical, already-tested pattern in
+    # consultant_assignments.py's create_assignment(). Currently a
+    # data-integrity/defense-in-depth guard (verified: no code path derives
+    # get_user_permissions()'s company_id from anything but the acting
+    # user's own fixed User.company_id, so a cross-org row is inert today,
+    # not actively exploitable) — but correct structural behavior and
+    # hardens against future authorization-logic changes.
+    if body.company_id is not None:
+        company = session.get(Company, body.company_id)
+        if not company or company.organization_id != actor.organization_id:
+            raise NotFoundError("Company not found")
     exists = session.exec(
         select(UserRole).where(
             UserRole.user_id == body.user_id,

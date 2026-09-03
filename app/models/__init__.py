@@ -13,3 +13,5 @@ from app.models.integration import Integration  # noqa: F401
 # Stage 5
 from app.models.review import Review, ReviewComment  # noqa: F401
 from app.models.notification import Notification, NotificationOutbox  # noqa: F401
+# Layer 1
+from app.models.kpi import KpiDefinition, KpiValue  # noqa: F401
