@@ -98,7 +98,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "comment:read", "comment:create",
         "report:read", "report:generate", "benchmark:read",
         "assessment:manage", "assessment:respond",
-        "site:read", "site:manage", "business_unit:read", "business_unit:manage", "department:read", "department:manage", "upload_type:read", "dataset:submit", "file:upload", "file:download", "audit:read",
+        "site:read", "site:manage", "business_unit:read", "business_unit:manage", "department:read", "department:manage", "upload_type:read", "dataset:submit", "file:upload", "file:download", "audit:read", "integration:manage",
         "notification:read"],
     "Client Reviewer": [
         "company:read", "dataset:read", "dataset:review", "comment:read", "comment:create",

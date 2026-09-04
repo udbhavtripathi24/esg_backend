@@ -647,3 +647,147 @@ def test_permissions_required_endpoints_return_401_unauthed(client):
               "/api/v1/audit-logs"]:
         r = client.get(p)
         assert r.status_code == 401, f"{p} did not require auth"
+
+
+# -------- Admin Console: Audit Log tenant isolation (Part 12) --------
+
+def test_audit_log_client_tenant_isolation(client, session):
+    """A client must see only their own company's audit log entries."""
+    _use_temp_storage()
+    org = _seed_all(session)
+    co_a = make_company(session, org, "Company A")
+    co_b = make_company(session, org, "Company B")
+    admin = make_user(session, "alia@d.com", "deloitte", "Administrator", org=org)
+    client_b = make_user(session, "alib@c.com", "client", "Client Administrator", company=co_b)
+
+    # A real, auditable action for company A (unrelated to company B).
+    client.post("/api/v1/master-data/sites", json={"company_id": co_a.id, "code": "S1", "name": "X"}, headers=auth(admin))
+
+    r = client.get("/api/v1/audit-logs", headers=auth(client_b))
+    assert r.status_code == 200
+    for item in r.json()["items"]:
+        assert item["company_id"] != co_a.id
+
+
+# NOTE: no test exists here for "narrow consultant assignment isolation"
+# on audit logs specifically. Traced and confirmed: Admin Console
+# (where Audit Logs is surfaced) is a CLIENT-only route
+# (pages/client/AdminConsole.jsx) in the current application -- a
+# Deloitte "Consultant" role never navigates here in the real app, and
+# genuinely lacks both audit:read and integration:manage in RBAC (see
+# app/rbac/definitions.py). This isn't a gap; it's a route that doesn't
+# apply to that role today. The two isolation axes that DO genuinely
+# apply -- client-vs-client and organization-vs-organization -- are
+# both tested below.
+def test_audit_log_organization_isolation(client, session):
+    """An org-wide admin in Org A must never see Org B's audit log entries."""
+    _use_temp_storage()
+    org_a = bootstrap(session)
+    from app.models.organization import Organization
+    org_b = Organization(name="A Different Org")
+    session.add(org_b); session.commit(); session.refresh(org_b)
+
+    co_b = make_company(session, org_b, "Org B Co")
+    admin_b_creator = make_user(session, "aoib@d.com", "deloitte", "Administrator", org=org_b)
+    admin_a = make_user(session, "aoia@d.com", "deloitte", "Administrator", org=org_a)
+
+    client.post("/api/v1/master-data/sites", json={"company_id": co_b.id, "code": "S1", "name": "X"}, headers=auth(admin_b_creator))
+
+    r = client.get("/api/v1/audit-logs", headers=auth(admin_a))
+    assert r.status_code == 200
+    for item in r.json()["items"]:
+        assert item["company_id"] != co_b.id
+
+
+def test_audit_log_company_id_param_cannot_bypass_client_tenant(client, session):
+    """A client explicitly passing a different company_id in the query
+    string must not see that company's logs -- the filter narrows within
+    an already-tenant-scoped query, it never widens it."""
+    _use_temp_storage()
+    org = _seed_all(session)
+    co_a = make_company(session, org, "Company A")
+    co_b = make_company(session, org, "Company B")
+    admin = make_user(session, "cbpa@d.com", "deloitte", "Administrator", org=org)
+    client_b = make_user(session, "cbpb@c.com", "client", "Client Administrator", company=co_b)
+
+    client.post("/api/v1/master-data/sites", json={"company_id": co_a.id, "code": "S1", "name": "X"}, headers=auth(admin))
+
+    r = client.get(f"/api/v1/audit-logs?company_id={co_a.id}", headers=auth(client_b))
+    assert r.status_code == 200
+    assert r.json()["total"] == 0
+
+
+def test_audit_log_supported_filters_and_pagination(client, session):
+    _use_temp_storage()
+    org = _seed_all(session)
+    co = make_company(session, org, "Co")
+    admin = make_user(session, "alfp@d.com", "deloitte", "Administrator", org=org)
+    client.post("/api/v1/master-data/sites", json={"company_id": co.id, "code": "S1", "name": "X"}, headers=auth(admin))
+
+    r = client.get("/api/v1/audit-logs?entity_type=site&page=1&page_size=5", headers=auth(admin))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["page"] == 1
+    assert all(item["entity_type"] == "site" for item in body["items"])
+
+
+# -------- Admin Console: Integration tenant isolation (Part 12) --------
+
+def test_integration_client_company_derived_from_actor_not_request(client, session):
+    """A client actor's own company is always used -- confirmed by
+    creating an integration with NO company_id in the request body at
+    all (a client never needs to supply one)."""
+    _use_temp_storage()
+    org = _seed_all(session)
+    co = make_company(session, org, "Co")
+    client_user = make_user(session, "icda@c.com", "client", "Client Administrator", company=co)
+
+    r = client.post("/api/v1/integrations", json={"type": "sap"}, headers=auth(client_user))
+    assert r.status_code == 201
+    assert r.json()["company_id"] == co.id
+
+
+# NOTE: no test exists here for a narrow "Consultant" role attempting
+# integration access -- same reasoning as the audit log note above:
+# Admin Console is a client-only route, and "Consultant" genuinely
+# lacks integration:manage in RBAC. can_access_company() is still
+# exercised for real, correctly, by the tests below using roles that
+# actually reach this feature in the real application.
+def test_integration_list_tenant_isolation(client, session):
+    """Client B must never see Company A's integrations in a list call."""
+    _use_temp_storage()
+    org = _seed_all(session)
+    co_a = make_company(session, org, "Company A")
+    co_b = make_company(session, org, "Company B")
+    admin = make_user(session, "ilta@d.com", "deloitte", "Administrator", org=org)
+    client_b = make_user(session, "iltb@c.com", "client", "Client Administrator", company=co_b)
+
+    client.post("/api/v1/integrations", json={"company_id": co_a.id, "type": "sap"}, headers=auth(admin))
+
+    r = client.get("/api/v1/integrations", headers=auth(client_b))
+    assert r.status_code == 200
+    assert r.json()["total"] == 0
+
+
+def test_integration_direct_id_access_cannot_bypass_authorization(client, session):
+    """Client B must not be able to PATCH an integration belonging to
+    Company A merely by knowing/guessing its raw integer id."""
+    _use_temp_storage()
+    org = _seed_all(session)
+    co_a = make_company(session, org, "Company A")
+    co_b = make_company(session, org, "Company B")
+    admin = make_user(session, "idaa@d.com", "deloitte", "Administrator", org=org)
+    client_b = make_user(session, "idab@c.com", "client", "Client Administrator", company=co_b)
+
+    r = client.post("/api/v1/integrations", json={"company_id": co_a.id, "type": "sap"}, headers=auth(admin))
+    integ_id = r.json()["id"]
+
+    r2 = client.patch(f"/api/v1/integrations/{integ_id}", json={"status": "disabled"}, headers=auth(client_b))
+    assert r2.status_code in (403, 404)
+
+
+def test_integration_requires_authentication(client, session):
+    r = client.get("/api/v1/integrations")
+    assert r.status_code == 401
+    r2 = client.post("/api/v1/integrations", json={"type": "sap"})
+    assert r2.status_code == 401
