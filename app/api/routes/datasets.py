@@ -443,21 +443,37 @@ def download_signed(encoded_key: str, expires: int, sig: str,
                     session: Session = Depends(get_session)):
     """Redemption endpoint for LOCAL-adapter signed URLs.
 
-    Even though the signature is HMAC-verified, we STILL require the file to
-    exist and belong to a valid dataset. Defense in depth: a bug elsewhere
-    that generates a URL for a foreign file still can't leak that file's
-    contents because the redemption path re-checks."""
+    Even though the signature is HMAC-verified, we STILL require the key
+    to correspond to a real, known object. Defense in depth: a bug
+    elsewhere that generates a URL for a foreign file still can't leak
+    that file's contents because the redemption path re-checks.
+
+    Checks BOTH DatasetFile and ReportArtifact -- this endpoint is the
+    single shared redemption path for every signed URL the local storage
+    adapter issues, regardless of which feature requested it. Adding a
+    third object type later means adding a third check here, not a
+    third redemption endpoint."""
     key = LocalFilesystemStorage.verify_signature(encoded_key, expires, sig)
     if not key:
         raise NotFoundError("Invalid or expired URL")
+
     f = session.exec(select(DatasetFile).where(
         DatasetFile.storage_key == key, DatasetFile.deleted_at.is_(None)
     )).first()
+    mime_type, original_filename = (f.mime_type, f.original_filename) if f else (None, None)
+
     if not f:
+        from app.models.report import ReportArtifact
+        artifact = session.exec(select(ReportArtifact).where(ReportArtifact.storage_key == key)).first()
+        if artifact:
+            mime_type, original_filename = artifact.mime_type, artifact.original_filename
+
+    if mime_type is None:
         raise NotFoundError("File not found")
+
     storage = get_storage()
     stream = storage.get(key)
     return StreamingResponse(
-        stream, media_type=f.mime_type,
-        headers={"Content-Disposition": f'attachment; filename="{f.original_filename}"'},
+        stream, media_type=mime_type,
+        headers={"Content-Disposition": f'attachment; filename="{original_filename}"'},
     )

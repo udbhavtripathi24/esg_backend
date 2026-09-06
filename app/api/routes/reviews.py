@@ -184,6 +184,67 @@ def get_kpi_validation(
     return ValidationResult(is_available=True, errors=errors, warnings=warnings)
 
 
+class DataPreviewRow(BaseModel):
+    row_number: int
+    site_text: Optional[str]
+    site_public_id: Optional[str]
+    site_name: Optional[str]
+    kpi_code: str
+    kpi_display_name: str
+    value: float
+    unit: str
+    attributes: dict
+    source_filename: str
+
+
+class DataPreviewResult(BaseModel):
+    rows: list[DataPreviewRow]
+    skipped_count: int
+    upload_type_code: str
+
+
+@reviews_router.get(
+    "/datasets/{ds_pid}/versions/{v_pid}/data-preview",
+    response_model=DataPreviewResult,
+)
+def get_data_preview(
+    ds_pid: str, v_pid: str,
+    session: Session = Depends(get_session),
+    actor: User = Depends(require_permission("dataset:read")),
+):
+    """Real preview of the actual uploaded file's contents — available
+    at ANY point in the dataset version's lifecycle (draft, submitted,
+    under_review, approved, rejected, changes_requested), unlike
+    kpi-validation above, which correctly requires extraction (and
+    therefore approval) to have already happened.
+
+    This is the fix for a real gap found during manual testing: a
+    reviewer was previously unable to see any of a submission's actual
+    data before deciding whether to approve it, because the only
+    preview available was tied to post-approval KpiValue rows. This
+    endpoint reads and parses the real uploaded file directly, via
+    app/services/data_file_parser.py, with zero database writes —
+    looking at this can never trigger extraction, never create a
+    KpiValue row, and never has any side effect on approval status.
+
+    Never fabricates a preview when the file is missing/unreadable —
+    a genuine parse failure raises a real 422, not an empty success.
+    """
+    ds, v = _find_dataset_and_version(session, actor, ds_pid, v_pid)
+
+    from app.services.data_file_parser import parse_data_file_rows, FileParseError
+    try:
+        result = parse_data_file_rows(session, v.id)
+    except FileParseError as e:
+        raise AppError("preview_unavailable", str(e), 422)
+
+    return DataPreviewResult(
+        rows=[DataPreviewRow(**r) for r in result["rows"]],
+        skipped_count=result["skipped_count"],
+        upload_type_code=result["upload_type_code"],
+    )
+
+
 @reviews_router.post(
     "/datasets/{ds_pid}/versions/{v_pid}/reviews",
     response_model=ReviewRead, status_code=201,

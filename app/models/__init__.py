@@ -15,3 +15,5 @@ from app.models.review import Review, ReviewComment  # noqa: F401
 from app.models.notification import Notification, NotificationOutbox  # noqa: F401
 # Layer 1
 from app.models.kpi import KpiDefinition, KpiValue  # noqa: F401
+# Report Generation
+from app.models.report import Report, ReportVersion, ReportSnapshot, ReportArtifact, ReportTemplate  # noqa: F401

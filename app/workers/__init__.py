@@ -98,6 +98,19 @@ def _extract_metadata(session: Session, job: ProcessingJob) -> None:
     # counts, sheet names, etc. Deliberately not built in Stage 4.
 
 
+@register("generate_report")
+def _generate_report(session: Session, job: ProcessingJob) -> None:
+    """Real report generation — see report_generation_worker.py for the
+    full safety design (build-in-memory-then-single-write, matching the
+    same discipline already proven for KPI extraction)."""
+    from app.services.report_generation_worker import generate_report_version, ReportGenerationError
+    try:
+        result = generate_report_version(session, job.subject_id, job_id=job.id)
+        log.info(f"report generation for report_version_id={job.subject_id}: {result}")
+    except ReportGenerationError as e:
+        raise RuntimeError(str(e))
+
+
 # ------- Loop -------
 
 def _claim_job(session: Session) -> ProcessingJob | None:

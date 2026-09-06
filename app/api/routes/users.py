@@ -13,7 +13,8 @@ Security invariants enforced here:
 """
 from typing import Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel
 from sqlmodel import Session, select, func, or_
 from app.db.session import get_session
 from app.models.user import User, UserCreate, UserRead, UserUpdate
@@ -23,6 +24,7 @@ from app.core.errors import NotFoundError, AppError
 from app.core.pagination import Page, paginate_params
 from app.core.security import hash_password
 from app.core.tenancy import accessible_company_ids
+from app.services.audit import log_action
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -154,6 +156,52 @@ def update_user(
     session.commit()
     session.refresh(user)
     return user
+
+
+class ResetPasswordBody(BaseModel):
+    new_password: str
+
+
+@router.post("/{user_id}/reset-password", status_code=204)
+def reset_user_password(
+    user_id: int,
+    body: ResetPasswordBody,
+    request: Request,
+    session: Session = Depends(get_session),
+    actor: User = Depends(require_permission("user:manage")),
+):
+    """Admin-triggered password reset -- genuinely different from
+    /auth/me/change-password (which requires knowing your OWN current
+    password). This is for the real, disclosed case where an admin
+    needs to give a user a NEW working password because the original
+    one-time password was lost -- there is no way to recover the old
+    one (only its hash is ever stored, by design), so a reset is the
+    correct and only real answer, not a "show it again" feature.
+
+    Deliberately a separate endpoint, not a new field bolted onto
+    UserUpdate/update_user above -- that endpoint does a blanket
+    setattr() for every field in the update, which would incorrectly
+    set a raw 'password' attribute (bypassing hashing entirely) rather
+    than calling hash_password(). A dedicated endpoint with its own
+    explicit hashing call avoids that risk entirely.
+
+    Same tenancy rule as update_user: a client actor may only reset
+    passwords for users in their own company.
+    """
+    user = session.get(User, user_id)
+    if not user or user.deleted_at is not None:
+        raise NotFoundError("User not found")
+    if actor.portal_type == "client" and user.company_id != actor.company_id:
+        raise NotFoundError("User not found")
+    if len(body.new_password) < 8:
+        raise AppError("password_too_short", "New password must be at least 8 characters", 422, "new_password")
+
+    user.hashed_password = hash_password(body.new_password)
+    user.updated_at = datetime.utcnow()
+    session.add(user)
+    log_action(session, actor, "user.password_reset_by_admin", "user", user.id, None,
+              company_id=user.company_id, ip_address=request.client.host if request.client else None)
+    session.commit()
 
 
 @router.delete("/{user_id}")
