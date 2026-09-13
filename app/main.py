@@ -7,7 +7,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.errors import register_error_handlers
 from app.middleware.request_context import RequestContextMiddleware
 from app.db.session import init_db
-from app.api.routes import (health, auth, companies, rbac, users, consultant_assignments, master_data, datasets, misc_stage4, reviews, kpi_values, dashboard, analytics, reporting, reports)
+from app.api.routes import (health, auth, companies, rbac, users, consultant_assignments, master_data, datasets, misc_stage4, reviews, kpi_values, dashboard, analytics, reporting, reports, demo_esg_dashboard)
 
 configure_logging(json_output=settings.is_production)
 log = get_logger("startup")
@@ -59,6 +59,7 @@ app.include_router(dashboard.router, prefix=settings.API_V1_PREFIX)
 app.include_router(analytics.router, prefix=settings.API_V1_PREFIX)
 app.include_router(reporting.router, prefix=settings.API_V1_PREFIX)
 app.include_router(reports.router, prefix=settings.API_V1_PREFIX)
+app.include_router(demo_esg_dashboard.router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/")
