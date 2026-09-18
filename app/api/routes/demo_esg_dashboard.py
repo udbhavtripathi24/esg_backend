@@ -15,7 +15,7 @@ Environment (GHG / Energy / Water / Waste), Social (Training /
 Diversity / Wellbeing / Health & Safety / Complaints), Governance
 (Leadership Diversity / Supply Chain Management).
 """
-from typing import Optional
+from typing import Optional, Annotated
 from fastapi import APIRouter, Depends, Query
 from app.api.deps import get_current_user
 from app.models.user import User
@@ -25,6 +25,9 @@ from app.services.demo_esg_data import (
     get_social_health_safety_data, get_social_complaints_data,
     get_governance_leadership_data, get_governance_supply_chain_data,
     get_filter_options,
+)
+from app.services.climate_risk_data import (
+    get_climate_filter_options, get_climate_trend_data, get_climate_scenario_data,
 )
 
 router = APIRouter(prefix="/demo-esg-dashboard", tags=["demo-esg-dashboard"])
@@ -98,3 +101,42 @@ def demo_governance_leadership(location: Optional[str] = Query(None), year: Opti
 @router.get("/governance/supply-chain")
 def demo_governance_supply_chain(location: Optional[str] = Query(None), year: Optional[int] = Query(None), month: Optional[str] = Query(None), actor: User = Depends(get_current_user)):
     return get_governance_supply_chain_data(**_common_params(location, year, month))
+
+
+# ---- Climate Risk Assessment ----
+
+@router.get("/climate/filters")
+def demo_climate_filters(actor: User = Depends(get_current_user)):
+    return get_climate_filter_options()
+
+
+@router.get("/climate/trend")
+def demo_climate_trend(
+    state: str = Query(...),
+    city: str = Query(...),
+    scenario: str = Query(...),
+    indicator: str = Query(...),
+    actor: User = Depends(get_current_user),
+):
+    return get_climate_trend_data(state=state, city=city, scenario=scenario, indicator=indicator)
+
+
+@router.get("/climate/scenario")
+def demo_climate_scenario(
+    state: str = Query(...),
+    scenario: str = Query(...),
+    years: str | None = Query(default=None),
+    actor: User = Depends(get_current_user),
+):
+    # Manually parse years if provided as comma-separated string or repeated params
+    years_list = None
+    if years:
+        try:
+            # Try to parse as comma-separated: "2026,2030,2050"
+            if ',' in years:
+                years_list = [int(y.strip()) for y in years.split(',')]
+            else:
+                years_list = [int(years)]
+        except (ValueError, AttributeError):
+            years_list = None
+    return get_climate_scenario_data(state=state, scenario=scenario, years=years_list)
