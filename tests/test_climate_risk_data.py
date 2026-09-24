@@ -58,13 +58,17 @@ def test_climate_trend_deterministic(client, session):
 
 
 def test_climate_scenario_group_count_matches_cities_and_years(client, session):
-    """Real behavior confirmed from the reference: a state with 2
+    """Years are sent as a comma-separated string ("2026,2030,2050"),
+    not repeated query params -- that is the real contract the frontend
+    uses (see getClimateScenario in src/api/demoEsgDashboard.js).
+
+    Real behavior confirmed from the reference: a state with 2
     cities and 3 selected years produces 6 groups; a state with 1 city
     produces 1 group per selected year."""
     user = _user(session)
     r = client.get(
         "/api/v1/demo-esg-dashboard/climate/scenario",
-        params={"state": "Tamil Nadu", "scenario": "SSP2-4.5", "years": [2026, 2030, 2050]},
+        params={"state": "Tamil Nadu", "scenario": "SSP2-4.5", "years": "2026,2030,2050"},
         headers=auth(user),
     )
     assert r.status_code == 200
@@ -74,7 +78,7 @@ def test_climate_scenario_group_count_matches_cities_and_years(client, session):
 
     r2 = client.get(
         "/api/v1/demo-esg-dashboard/climate/scenario",
-        params={"state": "Maharashtra", "scenario": "SSP2-4.5", "years": [2026]},
+        params={"state": "Maharashtra", "scenario": "SSP2-4.5", "years": "2026"},
         headers=auth(user),
     )
     assert len(r2.json()["groups"]) == 1
