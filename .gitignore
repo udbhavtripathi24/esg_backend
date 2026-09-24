@@ -24,7 +24,7 @@ env/
 .idea/
 
 # Local storage / generated files
-storage/
+/storage/
 *.log
 
 # Test / coverage
