@@ -283,3 +283,251 @@ def _recommendation_for(code: str) -> str:
         "msme_sourcing": "Map current suppliers against MSME registration \u2014 a share of existing vendors often already qualify but are not classified.",
         "privacy_complaints": "Review the complaint intake and closure workflow; unresolved ageing complaints weigh more heavily than volume alone.",
     }.get(code, "Review this KPI against the best-performing peer to identify the practical driver of the gap.")
+
+
+# =====================================================================
+# Deeper analysis layer
+# =====================================================================
+# Everything below is still plain deterministic maths on the same peer
+# matrix. The AI modes assemble narrative from these computed facts --
+# they never invent a figure, which is what keeps the "ask the AI"
+# experience trustworthy rather than decorative.
+
+
+def get_head_to_head(sector: str, period: str, peer: str) -> dict:
+    """Direct one-to-one comparison -- answers 'where is A better than B'.
+
+    Returns a per-KPI verdict plus a win/loss tally, using each KPI's own
+    direction so 'better' always means genuinely better performance and
+    not merely a larger number.
+    """
+    matrix = _build_matrix(sector, period)
+    if peer not in matrix or peer == YOUR_ORG:
+        return {"is_demo_data": True, "disclaimer": DEMO_DISCLAIMER, "not_found": True}
+
+    rows, you_win, peer_win, ties = [], 0, 0, 0
+    for kpi in BRSR_CORE_KPIS:
+        mine = matrix[YOUR_ORG][kpi["code"]]
+        theirs = matrix[peer][kpi["code"]]
+        if mine == theirs:
+            verdict, ties = "tie", ties + 1
+        elif (kpi["direction"] == "lower" and mine < theirs) or (kpi["direction"] == "higher" and mine > theirs):
+            verdict, you_win = "you", you_win + 1
+        else:
+            verdict, peer_win = "peer", peer_win + 1
+
+        # Percentage difference framed so positive always = you ahead.
+        if theirs:
+            raw = (mine - theirs) / abs(theirs) * 100
+            diff = round(raw if kpi["direction"] == "higher" else -raw, 1)
+        else:
+            diff = 0.0
+
+        rows.append({
+            "code": kpi["code"], "name": kpi["name"], "unit": kpi["unit"],
+            "pillar": kpi["pillar"], "direction": kpi["direction"],
+            "your_value": mine, "peer_value": theirs,
+            "verdict": verdict, "advantage_pct": diff,
+        })
+
+    return {
+        "is_demo_data": True, "disclaimer": DEMO_DISCLAIMER, "not_found": False,
+        "peer": peer, "you_win": you_win, "peer_win": peer_win, "ties": ties,
+        "rows": rows,
+        "summary": (
+            f"You outperform {peer} on {you_win} of {len(BRSR_CORE_KPIS)} BRSR Core KPIs, "
+            f"trail on {peer_win}" + (f", and tie on {ties}" if ties else "") + "."
+        ),
+    }
+
+
+def get_positioning_scatter(sector: str, period: str, x_kpi: str, y_kpi: str) -> dict:
+    """Two-dimensional positioning of every company in the peer set.
+
+    A ranking table tells you the order; a scatter tells you the shape of
+    the field -- who is clustered, who is an outlier, and whether the two
+    KPIs actually move together.
+    """
+    xk, yk = KPI_BY_CODE.get(x_kpi), KPI_BY_CODE.get(y_kpi)
+    if not xk or not yk:
+        return {"is_demo_data": True, "disclaimer": DEMO_DISCLAIMER, "not_found": True}
+
+    matrix = _build_matrix(sector, period)
+    points = [
+        {"company": c, "x": v[x_kpi], "y": v[y_kpi], "is_you": c == YOUR_ORG}
+        for c, v in matrix.items()
+    ]
+    xs = [p["x"] for p in points]
+    ys = [p["y"] for p in points]
+    return {
+        "is_demo_data": True, "disclaimer": DEMO_DISCLAIMER, "not_found": False,
+        "x_kpi": xk, "y_kpi": yk, "points": points,
+        "x_median": round(sorted(xs)[len(xs) // 2], 2),
+        "y_median": round(sorted(ys)[len(ys) // 2], 2),
+    }
+
+
+def _mean_percentiles(matrix: dict) -> dict:
+    companies = list(matrix.keys())
+    out = {}
+    for c in companies:
+        pcts = [
+            _percentile_rank(matrix[c][k["code"]], [matrix[x][k["code"]] for x in companies], k["direction"])
+            for k in BRSR_CORE_KPIS
+        ]
+        out[c] = round(sum(pcts) / len(pcts), 1)
+    return out
+
+
+def simulate_improvement(sector: str, period: str, kpi_code: str, improvement_pct: float) -> dict:
+    """What-if: improve one KPI by N% and recompute the real standing.
+
+    The whole matrix is re-ranked with the new value substituted, so the
+    resulting rank is computed exactly the same way as the live one --
+    not estimated. This is deliberately deterministic: a model guessing
+    at 'you would probably move up' would be worthless next to actually
+    recomputing it.
+    """
+    kpi = KPI_BY_CODE.get(kpi_code)
+    if not kpi:
+        return {"is_demo_data": True, "disclaimer": DEMO_DISCLAIMER, "not_found": True}
+
+    matrix = _build_matrix(sector, period)
+    companies = list(matrix.keys())
+    before_means = _mean_percentiles(matrix)
+    before_order = sorted(before_means.items(), key=lambda kv: kv[1], reverse=True)
+    before_rank = next(i + 1 for i, (c, _) in enumerate(before_order) if c == YOUR_ORG)
+
+    current = matrix[YOUR_ORG][kpi_code]
+    # "Improve" means move in the direction that is actually better.
+    factor = 1 - improvement_pct / 100 if kpi["direction"] == "lower" else 1 + improvement_pct / 100
+    new_value = round(max(current * factor, 0), 2)
+
+    sim = {c: dict(v) for c, v in matrix.items()}
+    sim[YOUR_ORG][kpi_code] = new_value
+    after_means = _mean_percentiles(sim)
+    after_order = sorted(after_means.items(), key=lambda kv: kv[1], reverse=True)
+    after_rank = next(i + 1 for i, (c, _) in enumerate(after_order) if c == YOUR_ORG)
+
+    pop_before = [matrix[c][kpi_code] for c in companies]
+    pop_after = [sim[c][kpi_code] for c in companies]
+    kpi_pct_before = _percentile_rank(current, pop_before, kpi["direction"])
+    kpi_pct_after = _percentile_rank(new_value, pop_after, kpi["direction"])
+
+    overtaken = [
+        c for c in companies
+        if c != YOUR_ORG and before_means[c] > before_means[YOUR_ORG] and after_means[c] < after_means[YOUR_ORG]
+    ]
+
+    return {
+        "is_demo_data": True, "disclaimer": DEMO_DISCLAIMER, "not_found": False,
+        "kpi": kpi, "improvement_pct": improvement_pct,
+        "current_value": current, "new_value": new_value,
+        "kpi_percentile_before": kpi_pct_before, "kpi_percentile_after": kpi_pct_after,
+        "overall_percentile_before": before_means[YOUR_ORG],
+        "overall_percentile_after": after_means[YOUR_ORG],
+        "rank_before": before_rank, "rank_after": after_rank,
+        "rank_change": before_rank - after_rank,
+        "companies_overtaken": overtaken,
+        "total_companies": len(companies),
+    }
+
+
+def get_ai_analysis(sector: str, period: str, mode: str) -> dict:
+    """Several genuinely different reads of the same computed numbers.
+
+    One generic paragraph is not much of an 'AI analysis' -- an executive
+    wants a different answer than someone planning next quarter's work.
+    Each mode below is assembled from the real figures; when a live model
+    is wired in, this same payload becomes its prompt context.
+    """
+    o = get_benchmark_overview(sector, period)
+    ranked = sorted(o["kpis"], key=lambda r: r["percentile"], reverse=True)
+    leader = o["leaderboard"][0]["company"]
+
+    if mode == "positioning":
+        h2h = get_head_to_head(sector, period, leader) if leader != YOUR_ORG else None
+        if h2h and not h2h.get("not_found"):
+            beat = [r["name"] for r in h2h["rows"] if r["verdict"] == "you"]
+            lose = [r["name"] for r in h2h["rows"] if r["verdict"] == "peer"]
+            body = (
+                f"{leader} leads the sector on mean percentile. You already beat them on "
+                f"{len(beat)} of {len(h2h['rows'])} KPIs"
+                + (f" \u2014 notably {', '.join(beat[:3])}." if beat else ".")
+                + (f" They stay ahead on {', '.join(lose[:3])}"
+                   f"{' and others' if len(lose) > 3 else ''}, which is where the rank gap actually comes from."
+                   if lose else "")
+            )
+        else:
+            body = "You currently lead the sector on mean percentile across the nine BRSR Core KPIs."
+        points = [
+            {"label": "Sector leader", "value": leader},
+            {"label": "Your rank", "value": f"#{o['overall_rank']} of {o['total_companies']}"},
+            {"label": "Mean percentile", "value": f"{o['overall_percentile']}%"},
+        ]
+
+    elif mode == "roadmap":
+        worst = sorted(o["kpis"], key=lambda r: r["percentile"])[:4]
+        body = (
+            "Priorities below are ordered by how far behind the peer set you are. "
+            "Percentile headroom is the share of peers you would pass by reaching best-in-peer on that KPI."
+        )
+        points = [
+            {
+                "label": f"{i + 1}. {w['name']}",
+                "value": f"{round(100 - w['percentile'], 1)}% headroom \u00b7 gap {w['gap_to_best']} {w['unit']} to {w['best_company']}",
+                "detail": _recommendation_for(w["code"]),
+            }
+            for i, w in enumerate(worst)
+        ]
+
+    elif mode == "risk":
+        bottom = [r for r in o["kpis"] if r["percentile"] < 25]
+        below = [r for r in o["kpis"] if 25 <= r["percentile"] < 50]
+        body = (
+            f"{len(bottom)} KPI(s) sit in the bottom quartile of the peer set and "
+            f"{len(below)} more are below the median. In a disclosure cycle these are the "
+            "figures most likely to attract questions, because peers in the same sector are "
+            "reporting visibly better numbers on the same standardised metric."
+        )
+        points = ([{"label": r["name"], "value": f"bottom quartile \u00b7 {r['percentile']}%",
+                    "detail": f"Peer best is {r['best_value']} {r['unit']} ({r['best_company']})."} for r in bottom]
+                  + [{"label": r["name"], "value": f"below median \u00b7 {r['percentile']}%"} for r in below])
+        if not points:
+            points = [{"label": "No KPIs below the peer median", "value": "\u2014"}]
+
+    else:  # executive
+        mode = "executive"
+        top, bottom = ranked[0], ranked[-1]
+        body = (
+            f"Across {o['peer_count']} peers in {sector} for {period} you rank #{o['overall_rank']} "
+            f"of {o['total_companies']}, ahead of the median on {o['kpis_ahead_of_median']} of "
+            f"{o['kpis_total']} BRSR Core KPIs. Your strongest position is {top['name']} "
+            f"({top['percentile']}% of peers outperformed); the weakest is {bottom['name']} "
+            f"({bottom['percentile']}%), where {bottom['best_company']} sets the peer benchmark at "
+            f"{bottom['best_value']} {bottom['unit']}."
+        )
+        points = [
+            {"label": "Overall percentile", "value": f"{o['overall_percentile']}%"},
+            {"label": "KPIs above median", "value": f"{o['kpis_ahead_of_median']} of {o['kpis_total']}"},
+            {"label": "Strongest KPI", "value": top["name"]},
+            {"label": "Weakest KPI", "value": bottom["name"]},
+        ]
+
+    return {
+        "is_demo_data": True, "disclaimer": DEMO_DISCLAIMER,
+        "mode": mode, "body": body, "points": points,
+    }
+
+
+def get_analysis_modes() -> list[dict]:
+    return [
+        {"key": "executive", "label": "Executive summary", "description": "Where you stand, in one read"},
+        {"key": "positioning", "label": "Competitive positioning", "description": "How you compare to the sector leader"},
+        {"key": "roadmap", "label": "Improvement roadmap", "description": "Prioritised actions with headroom"},
+        {"key": "risk", "label": "Disclosure risk", "description": "KPIs most likely to draw scrutiny"},
+    ]
+
+
+def get_peer_list(sector: str) -> list[str]:
+    return SECTORS.get(sector, [])

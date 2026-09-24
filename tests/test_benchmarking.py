@@ -121,3 +121,89 @@ def test_deterministic(client, session):
 
 def test_requires_authentication(client):
     assert client.get("/api/v1/benchmarking/overview").status_code == 401
+
+
+# ---- Deeper analysis layer ----
+
+def test_head_to_head_direction_aware_verdicts(client, session):
+    user = _user(session)
+    r = client.get("/api/v1/benchmarking/head-to-head",
+                   params={"peer": "Meridian Industries Ltd"}, headers=auth(user))
+    assert r.status_code == 200
+    b = r.json()
+    assert b["you_win"] + b["peer_win"] + b["ties"] == 9
+    for row in b["rows"]:
+        # A verdict must agree with the KPI's own direction -- this is the
+        # check that catches "better" being computed backwards.
+        if row["verdict"] == "you":
+            if row["direction"] == "lower":
+                assert row["your_value"] < row["peer_value"]
+            else:
+                assert row["your_value"] > row["peer_value"]
+
+
+def test_head_to_head_rejects_unknown_peer(client, session):
+    user = _user(session)
+    r = client.get("/api/v1/benchmarking/head-to-head", params={"peer": "Nonexistent Ltd"}, headers=auth(user))
+    assert r.json()["not_found"] is True
+
+
+def test_scatter_includes_every_company_and_medians(client, session):
+    user = _user(session)
+    r = client.get("/api/v1/benchmarking/scatter",
+                   params={"x_kpi": "ghg_intensity", "y_kpi": "energy_intensity"}, headers=auth(user))
+    b = r.json()
+    assert len(b["points"]) == 7
+    assert sum(1 for p in b["points"] if p["is_you"]) == 1
+    assert b["x_median"] > 0 and b["y_median"] > 0
+
+
+def test_simulation_improves_in_the_correct_direction(client, session):
+    user = _user(session)
+    low = client.get("/api/v1/benchmarking/simulate",
+                     params={"kpi_code": "ghg_intensity", "improvement_pct": 30}, headers=auth(user)).json()
+    # lower-is-better: improving must DECREASE the value
+    assert low["new_value"] < low["current_value"]
+    assert low["kpi_percentile_after"] >= low["kpi_percentile_before"]
+
+    high = client.get("/api/v1/benchmarking/simulate",
+                      params={"kpi_code": "renewable_share", "improvement_pct": 30}, headers=auth(user)).json()
+    # higher-is-better: improving must INCREASE the value
+    assert high["new_value"] > high["current_value"]
+
+
+def test_simulation_zero_improvement_is_a_no_op(client, session):
+    user = _user(session)
+    b = client.get("/api/v1/benchmarking/simulate",
+                   params={"kpi_code": "ghg_intensity", "improvement_pct": 0}, headers=auth(user)).json()
+    assert b["rank_before"] == b["rank_after"]
+    assert b["rank_change"] == 0
+
+
+def test_all_analysis_modes_return_real_content(client, session):
+    user = _user(session)
+    modes = client.get("/api/v1/benchmarking/analysis-modes", headers=auth(user)).json()["modes"]
+    assert {m["key"] for m in modes} == {"executive", "positioning", "roadmap", "risk"}
+    for m in modes:
+        b = client.get("/api/v1/benchmarking/analysis", params={"mode": m["key"]}, headers=auth(user)).json()
+        assert b["mode"] == m["key"]
+        assert len(b["body"]) > 40
+        assert len(b["points"]) >= 1
+
+
+def test_analysis_modes_are_actually_different(client, session):
+    user = _user(session)
+    bodies = {
+        m: client.get("/api/v1/benchmarking/analysis", params={"mode": m}, headers=auth(user)).json()["body"]
+        for m in ["executive", "positioning", "roadmap", "risk"]
+    }
+    assert len(set(bodies.values())) == 4, "each mode must give a genuinely different read"
+
+
+def test_peers_list_scoped_to_sector(client, session):
+    user = _user(session)
+    mfg = client.get("/api/v1/benchmarking/peers", params={"sector": "Manufacturing"}, headers=auth(user)).json()["peers"]
+    energy = client.get("/api/v1/benchmarking/peers", params={"sector": "Energy & Utilities"}, headers=auth(user)).json()["peers"]
+    assert "Meridian Industries Ltd" in mfg
+    assert "Everest Power Ltd" in energy
+    assert not set(mfg) & set(energy)
