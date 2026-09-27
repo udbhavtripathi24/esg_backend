@@ -153,7 +153,10 @@ def test_scatter_includes_every_company_and_medians(client, session):
     r = client.get("/api/v1/benchmarking/scatter",
                    params={"x_kpi": "ghg_intensity", "y_kpi": "energy_intensity"}, headers=auth(user))
     b = r.json()
-    assert len(b["points"]) == 7
+    # Derived, not hardcoded: the peer set grows as the library grows, and
+    # a fixed number here would go stale the moment it does.
+    peers = client.get("/api/v1/benchmarking/peers", params={"sector": "Manufacturing"}, headers=auth(user)).json()["peers"]
+    assert len(b["points"]) == len(peers) + 1  # peers plus your own organisation
     assert sum(1 for p in b["points"] if p["is_you"]) == 1
     assert b["x_median"] > 0 and b["y_median"] > 0
 
@@ -207,3 +210,41 @@ def test_peers_list_scoped_to_sector(client, session):
     assert "Meridian Industries Ltd" in mfg
     assert "Everest Power Ltd" in energy
     assert not set(mfg) & set(energy)
+
+
+# ---- Peer library: curated entries plus client-uploaded custom peers ----
+
+def test_library_has_ten_curated_companies_per_sector(client, session):
+    user = _user(session)
+    for sector in ["Manufacturing", "Chemicals & Pharma", "Energy & Utilities"]:
+        b = client.get("/api/v1/benchmarking/library", params={"sector": sector}, headers=auth(user)).json()
+        assert b["curated_count"] == 10, f"{sector} should curate ten filers"
+
+
+def test_library_separates_curated_from_uploaded(client, session):
+    """Provenance must stay visible -- a curated entry is one we stand
+    behind, an uploaded one is the client's own research."""
+    user = _user(session)
+    b = client.get("/api/v1/benchmarking/library", params={"sector": "Manufacturing"}, headers=auth(user)).json()
+    sources = {e["source"] for e in b["entries"]}
+    assert sources == {"Standard library", "Uploaded by you"}
+    assert len(b["entries"]) == b["curated_count"] + b["custom_count"]
+
+
+def test_custom_peers_are_included_in_the_comparison(client, session):
+    user = _user(session)
+    peers = client.get("/api/v1/benchmarking/peers", params={"sector": "Manufacturing"}, headers=auth(user)).json()["peers"]
+    assert any("(uploaded)" in p for p in peers)
+    o = client.get("/api/v1/benchmarking/overview", params={"sector": "Manufacturing"}, headers=auth(user)).json()
+    assert any("(uploaded)" in r["company"] for r in o["leaderboard"])
+
+
+def test_roadmap_wording_is_plain_language(client, session):
+    """'Headroom' was jargon nobody outside the build understood. The
+    roadmap must say what it means in words a reader can act on."""
+    user = _user(session)
+    b = client.get("/api/v1/benchmarking/analysis", params={"mode": "roadmap"}, headers=auth(user)).json()
+    assert "headroom" not in b["body"].lower()
+    for p in b["points"]:
+        assert "headroom" not in p["value"].lower()
+        assert "move you ahead of" in p["value"]

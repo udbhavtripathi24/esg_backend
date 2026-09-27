@@ -55,19 +55,44 @@ KPI_BY_CODE = {k["code"]: k for k in BRSR_CORE_KPIS}
 
 YOUR_ORG = "Your Organization"
 
+# The standard library: the top ten filers we curate per sector. Ten is a
+# deliberate figure -- percentile resolution is bounded by peer count
+# (with N peers a percentile can only land on multiples of 100/N), so a
+# thin library produces coarse, unconvincing rankings.
+#
+# A client who wants to compare against a company outside this list can
+# upload that company's own BRSR filing; it then joins the comparison as
+# a custom peer for them alone. See CUSTOM_PEERS below.
 SECTORS = {
     "Manufacturing": [
         "Meridian Industries Ltd", "Sundaram Steelworks Ltd", "Arcadia Cements Ltd",
         "Pinnacle Auto Components Ltd", "Zenith Metals Ltd", "Vantage Textiles Ltd",
+        "Corbett Engineering Ltd", "Deccan Forgings Ltd", "Marigold Packaging Ltd",
+        "Ironwood Fabrication Ltd",
     ],
     "Chemicals & Pharma": [
         "Kaveri Chemicals Ltd", "Sterling Pharma Ltd", "Halcyon Specialty Chemicals Ltd",
-        "Orbit Life Sciences Ltd", "Trident Agrochem Ltd",
+        "Orbit Life Sciences Ltd", "Trident Agrochem Ltd", "Bluepeak Biosciences Ltd",
+        "Vermilion Dyes Ltd", "Anantha Formulations Ltd", "Crestline Polymers Ltd",
+        "Saffron Healthcare Ltd",
     ],
     "Energy & Utilities": [
         "Everest Power Ltd", "Nimbus Energy Ltd", "Solstice Renewables Ltd",
-        "Cascade Utilities Ltd", "Aurora Grid Ltd",
+        "Cascade Utilities Ltd", "Aurora Grid Ltd", "Tarawind Power Ltd",
+        "Blackridge Coal & Power Ltd", "Lumen Transmission Ltd", "Highvolt Utilities Ltd",
+        "Greenspan Hydro Ltd",
     ],
+}
+
+# Peers a client added themselves by uploading that company's BRSR. In the
+# prototype this is seeded so the flow can be demonstrated; in production
+# each entry would be created by a real upload and scoped to the company
+# that uploaded it, since it is their own research rather than curated
+# library content.
+CUSTOM_PEERS = {
+    "Manufacturing": ["Kestrel Alloys Ltd (uploaded)"],
+    "Chemicals & Pharma": [],
+    "Energy & Utilities": [],
 }
 PERIODS = ["FY 2024-25", "FY 2023-24", "FY 2022-23"]
 
@@ -96,7 +121,7 @@ def _percentile_rank(value: float, population: list[float], direction: str) -> f
 
 
 def _companies_for(sector: str) -> list[str]:
-    return [YOUR_ORG] + SECTORS.get(sector, [])
+    return [YOUR_ORG] + SECTORS.get(sector, []) + CUSTOM_PEERS.get(sector, [])
 
 
 def _value_for(company: str, kpi: dict, sector: str, period: str) -> float:
@@ -256,7 +281,7 @@ def get_ai_insights(sector: str, period: str) -> dict:
                 "name": w["name"],
                 "detail": (
                     f"{w['your_value']} {w['unit']} vs best-in-peer {w['best_value']} {w['unit']} "
-                    f"({w['best_company']}). Closing this gap would move you past "
+                    f"({w['best_company']}). Closing this gap would move you ahead of "
                     f"{round(100 - w['percentile'], 1)}% of the peer set."
                 ),
                 "recommendation": _recommendation_for(w["code"]),
@@ -469,13 +494,16 @@ def get_ai_analysis(sector: str, period: str, mode: str) -> dict:
     elif mode == "roadmap":
         worst = sorted(o["kpis"], key=lambda r: r["percentile"])[:4]
         body = (
-            "Priorities below are ordered by how far behind the peer set you are. "
-            "Percentile headroom is the share of peers you would pass by reaching best-in-peer on that KPI."
+            "Ordered by how much ground you stand to gain. The percentage on each row is how many "
+            "peers you would move ahead of if you matched the best performer on that KPI."
         )
         points = [
             {
                 "label": f"{i + 1}. {w['name']}",
-                "value": f"{round(100 - w['percentile'], 1)}% headroom \u00b7 gap {w['gap_to_best']} {w['unit']} to {w['best_company']}",
+                "value": (
+                    f"Would move you ahead of {round(100 - w['percentile'], 1)}% of peers \u00b7 "
+                    f"gap of {w['gap_to_best']} {w['unit']} to {w['best_company']}"
+                ),
                 "detail": _recommendation_for(w["code"]),
             }
             for i, w in enumerate(worst)
@@ -524,10 +552,42 @@ def get_analysis_modes() -> list[dict]:
     return [
         {"key": "executive", "label": "Executive summary", "description": "Where you stand, in one read"},
         {"key": "positioning", "label": "Competitive positioning", "description": "How you compare to the sector leader"},
-        {"key": "roadmap", "label": "Improvement roadmap", "description": "Prioritised actions with headroom"},
+        {"key": "roadmap", "label": "Improvement roadmap", "description": "Where you stand to gain the most ground"},
         {"key": "risk", "label": "Disclosure risk", "description": "KPIs most likely to draw scrutiny"},
     ]
 
 
 def get_peer_list(sector: str) -> list[str]:
-    return SECTORS.get(sector, [])
+    return SECTORS.get(sector, []) + CUSTOM_PEERS.get(sector, [])
+
+
+def get_library(sector: str, period: str) -> dict:
+    """The peer library for a sector, separating curated entries from any
+    the client added themselves.
+
+    Kept distinct on purpose: a curated entry is one we stand behind, a
+    custom one is the client's own upload. Blurring the two would make it
+    impossible to say where a given figure came from.
+    """
+    curated = SECTORS.get(sector, [])
+    custom = CUSTOM_PEERS.get(sector, [])
+    matrix = _build_matrix(sector, period)
+
+    def _entry(name: str, source: str) -> dict:
+        vals = matrix.get(name, {})
+        return {
+            "company": name,
+            "source": source,
+            "kpis_available": len(vals),
+            "kpis_total": len(BRSR_CORE_KPIS),
+            "period": period,
+        }
+
+    return {
+        "is_demo_data": True, "disclaimer": DEMO_DISCLAIMER,
+        "sector": sector, "period": period,
+        "curated_count": len(curated),
+        "custom_count": len(custom),
+        "entries": [_entry(c, "Standard library") for c in curated]
+                   + [_entry(c, "Uploaded by you") for c in custom],
+    }

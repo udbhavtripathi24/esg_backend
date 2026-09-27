@@ -18,7 +18,7 @@ from app.services.benchmarking_data import (
     get_benchmark_filters, get_benchmark_overview, get_kpi_peer_comparison,
     get_pillar_summary, get_trend, get_ai_insights,
     get_head_to_head, get_positioning_scatter, simulate_improvement,
-    get_ai_analysis, get_analysis_modes, get_peer_list,
+    get_ai_analysis, get_analysis_modes, get_peer_list, get_library,
 )
 
 router = APIRouter(prefix="/benchmarking", tags=["benchmarking"])
@@ -128,3 +128,12 @@ def benchmark_analysis(
     actor: User = Depends(get_current_user),
 ):
     return get_ai_analysis(sector=sector, period=period, mode=mode)
+
+
+@router.get("/library")
+def benchmark_library(
+    sector: str = Query(DEFAULT_SECTOR),
+    period: str = Query(DEFAULT_PERIOD),
+    actor: User = Depends(get_current_user),
+):
+    return get_library(sector=sector, period=period)
