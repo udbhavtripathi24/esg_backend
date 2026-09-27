@@ -82,6 +82,24 @@ SECTORS = {
         "Blackridge Coal & Power Ltd", "Lumen Transmission Ltd", "Highvolt Utilities Ltd",
         "Greenspan Hydro Ltd",
     ],
+    "Logistics & Transport": [
+        "Pathway Logistics Ltd", "Redwing Freight Ltd", "Coastline Shipping Ltd",
+        "Trailblaze Roadways Ltd", "Skyport Cargo Ltd", "Ironrail Logistics Ltd",
+        "Harbourline Ports Ltd", "Swiftmile Express Ltd", "Continental Warehousing Ltd",
+        "Northgate Transport Ltd",
+    ],
+    "IT & Technology Services": [
+        "Cobalt Systems Ltd", "Nimbus Software Ltd", "Quanta Digital Ltd",
+        "Silverline Technologies Ltd", "Axiom Consulting Ltd", "Bytecraft Solutions Ltd",
+        "Lattice Analytics Ltd", "Meridian InfoTech Ltd", "Pinewood Cloud Ltd",
+        "Verity Data Services Ltd",
+    ],
+    "Consumer Goods & FMCG": [
+        "Harvest Foods Ltd", "Bluewater Beverages Ltd", "Everleaf Consumer Ltd",
+        "Goldmark Dairy Ltd", "Sunrise Personal Care Ltd", "Orchard Packaged Foods Ltd",
+        "Clearbrook Home Products Ltd", "Sandalwood Cosmetics Ltd", "Millstone Staples Ltd",
+        "Amberfield Confectionery Ltd",
+    ],
 }
 
 # Peers a client added themselves by uploading that company's BRSR. In the
@@ -93,7 +111,60 @@ CUSTOM_PEERS = {
     "Manufacturing": ["Kestrel Alloys Ltd (uploaded)"],
     "Chemicals & Pharma": [],
     "Energy & Utilities": [],
+    "Logistics & Transport": [],
+    "IT & Technology Services": [],
+    "Consumer Goods & FMCG": [],
 }
+
+
+# A KPI range that is plausible for a steel plant is absurd for a software
+# firm. Without per-sector calibration an IT company would show a GHG
+# intensity in the thirties and an LTIFR of 2.0, which anyone who knows
+# the sector would spot instantly and rightly distrust.
+#
+# Only the KPIs that genuinely differ by sector are overridden; anything
+# not listed falls back to the base range on the KPI itself. This is also
+# the clearest illustration of why benchmarking is only meaningful WITHIN
+# a sector -- several of these differ by an order of magnitude.
+SECTOR_KPI_RANGES = {
+    "Energy & Utilities": {
+        "ghg_intensity": (40.0, 190.0),
+        "energy_intensity": (400.0, 1600.0),
+        "water_intensity": (150.0, 900.0),
+    },
+    "Chemicals & Pharma": {
+        "ghg_intensity": (14.0, 68.0),
+        "water_intensity": (90.0, 480.0),
+    },
+    "Logistics & Transport": {
+        "ghg_intensity": (18.0, 72.0),     # fuel-driven, so high
+        "energy_intensity": (150.0, 620.0),
+        "water_intensity": (8.0, 45.0),    # but very little water
+        "ltifr": (0.4, 3.2),               # handling and road risk
+        "women_workforce": (5.0, 19.0),
+    },
+    "IT & Technology Services": {
+        "ghg_intensity": (0.4, 4.5),       # office-based, order of magnitude lower
+        "energy_intensity": (8.0, 62.0),
+        "water_intensity": (2.0, 22.0),
+        "waste_recycled": (35.0, 95.0),    # mostly e-waste and paper
+        "ltifr": (0.0, 0.35),
+        "women_workforce": (27.0, 47.0),   # markedly higher than industry
+        "msme_sourcing": (4.0, 22.0),
+        "privacy_complaints": (2.0, 30.0), # more data, more complaints
+    },
+    "Consumer Goods & FMCG": {
+        "ghg_intensity": (5.0, 30.0),
+        "energy_intensity": (80.0, 380.0),
+        "water_intensity": (90.0, 430.0),  # food and beverage are water-heavy
+        "waste_recycled": (28.0, 92.0),
+        "women_workforce": (13.0, 39.0),
+    },
+}
+
+
+def _range_for(kpi: dict, sector: str) -> tuple:
+    return SECTOR_KPI_RANGES.get(sector, {}).get(kpi["code"], kpi["range"])
 PERIODS = ["FY 2024-25", "FY 2023-24", "FY 2022-23"]
 
 
@@ -125,7 +196,7 @@ def _companies_for(sector: str) -> list[str]:
 
 
 def _value_for(company: str, kpi: dict, sector: str, period: str) -> float:
-    low, high = kpi["range"]
+    low, high = _range_for(kpi, sector)
     return _seeded(f"bm-{company}-{kpi['code']}-{sector}-{period}", low, high)
 
 

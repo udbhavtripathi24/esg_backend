@@ -248,3 +248,50 @@ def test_roadmap_wording_is_plain_language(client, session):
     for p in b["points"]:
         assert "headroom" not in p["value"].lower()
         assert "move you ahead of" in p["value"]
+
+
+# ---- Sector coverage and per-sector calibration ----
+
+def test_six_sectors_each_with_ten_curated_companies(client, session):
+    user = _user(session)
+    sectors = client.get("/api/v1/benchmarking/filters", headers=auth(user)).json()["sectors"]
+    assert len(sectors) == 6
+    for s in sectors:
+        lib = client.get("/api/v1/benchmarking/library", params={"sector": s}, headers=auth(user)).json()
+        assert lib["curated_count"] == 10, f"{s} should curate ten filers"
+
+
+def test_sector_profiles_are_plausible(client, session):
+    """A KPI range that fits a steel plant is absurd for a software firm.
+    These assertions encode the sector characteristics the demo data must
+    respect, so a future range change cannot silently make IT look like a
+    refinery."""
+    user = _user(session)
+
+    def avg(sector, code):
+        o = client.get("/api/v1/benchmarking/overview", params={"sector": sector}, headers=auth(user)).json()
+        return next(k["industry_average"] for k in o["kpis"] if k["code"] == code)
+
+    # Emissions intensity: energy generation >> heavy industry >> software
+    assert avg("Energy & Utilities", "ghg_intensity") > avg("Manufacturing", "ghg_intensity")
+    assert avg("Manufacturing", "ghg_intensity") > avg("IT & Technology Services", "ghg_intensity")
+
+    # Injury rate: logistics is a physical-handling business, software is not
+    assert avg("Logistics & Transport", "ltifr") > avg("IT & Technology Services", "ltifr")
+
+    # Gender diversity: IT services report markedly higher than logistics
+    assert avg("IT & Technology Services", "women_workforce") > avg("Logistics & Transport", "women_workforce")
+
+    # Water: beverage and food manufacturing is water-heavy, software is not
+    assert avg("Consumer Goods & FMCG", "water_intensity") > avg("IT & Technology Services", "water_intensity")
+
+
+def test_comparison_still_works_in_every_sector(client, session):
+    user = _user(session)
+    sectors = client.get("/api/v1/benchmarking/filters", headers=auth(user)).json()["sectors"]
+    for s in sectors:
+        o = client.get("/api/v1/benchmarking/overview", params={"sector": s}, headers=auth(user)).json()
+        assert len(o["kpis"]) == 9
+        assert 1 <= o["overall_rank"] <= o["total_companies"]
+        a = client.get("/api/v1/benchmarking/analysis", params={"sector": s, "mode": "roadmap"}, headers=auth(user)).json()
+        assert len(a["points"]) == 4
