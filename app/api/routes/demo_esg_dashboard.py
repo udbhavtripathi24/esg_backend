@@ -29,6 +29,10 @@ from app.services.demo_esg_data import (
 from app.services.climate_risk_data import (
     get_climate_filter_options, get_climate_trend_data, get_climate_scenario_data,
 )
+from app.services.climate_geo_data import (
+    get_district_filters, get_district_scores,
+    get_asset_filters, get_asset_scores, get_asset_horizon_profile,
+)
 
 router = APIRouter(prefix="/demo-esg-dashboard", tags=["demo-esg-dashboard"])
 
@@ -140,3 +144,50 @@ def demo_climate_scenario(
         except (ValueError, AttributeError):
             years_list = None
     return get_climate_scenario_data(state=state, scenario=scenario, years=years_list)
+
+
+# --- District-level and asset-level climate risk (geographic) ---
+
+@router.get("/climate/district/filters")
+def demo_climate_district_filters(actor: User = Depends(get_current_user)):
+    return get_district_filters()
+
+
+@router.get("/climate/district/scores")
+def demo_climate_district_scores(
+    sector: str = Query("Agriculture"),
+    hazard: str = Query("Flood"),
+    component: str = Query("Future Climate Risk"),
+    state: str | None = Query(default=None),
+    zone: str | None = Query(default=None),
+    actor: User = Depends(get_current_user),
+):
+    return get_district_scores(sector=sector, hazard=hazard, component=component,
+                               state=state, zone=zone)
+
+
+@router.get("/climate/asset/filters")
+def demo_climate_asset_filters(actor: User = Depends(get_current_user)):
+    return get_asset_filters()
+
+
+@router.get("/climate/asset/scores")
+def demo_climate_asset_scores(
+    hazard: str = Query("Cyclone"),
+    scenario: str = Query("SSP2-4.5"),
+    horizon: str = Query("MT"),
+    asset_type: str | None = Query(default=None),
+    actor: User = Depends(get_current_user),
+):
+    return get_asset_scores(hazard=hazard, scenario=scenario, horizon=horizon,
+                            asset_type=asset_type)
+
+
+@router.get("/climate/asset/profile")
+def demo_climate_asset_profile(
+    asset_id: str = Query(...),
+    hazard: str = Query("Cyclone"),
+    scenario: str = Query("SSP2-4.5"),
+    actor: User = Depends(get_current_user),
+):
+    return get_asset_horizon_profile(asset_id=asset_id, hazard=hazard, scenario=scenario)
