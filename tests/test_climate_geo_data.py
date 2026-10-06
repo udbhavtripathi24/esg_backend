@@ -20,7 +20,7 @@ def test_district_filters_cover_all_of_india(client, session):
     user = _user(session)
     b = client.get("/api/v1/demo-esg-dashboard/climate/district/filters", headers=auth(user)).json()
     assert len(b["states"]) == 36          # 28 states + 8 union territories
-    assert sum(len(v) for v in b["state_districts"].values()) == 760
+    assert sum(len(v) for v in b["state_districts"].values()) == 724
     assert len(b["agroclimatic_zones"]) == 15
     assert b["hazards"] == ["Flood", "Drought"]
     assert len(b["components"]) == 5
@@ -32,8 +32,8 @@ def test_district_scores_cover_every_district(client, session):
     b = client.get("/api/v1/demo-esg-dashboard/climate/district/scores",
                    params={"sector": "Agriculture", "hazard": "Flood",
                            "component": "Future Climate Risk"}, headers=auth(user)).json()
-    assert len(b["scores"]) == 760
-    assert b["district_count"] == 760
+    assert len(b["scores"]) == 724
+    assert b["district_count"] == 724
     assert all(0 <= s["score"] <= 100 for s in b["scores"])
 
 
@@ -43,8 +43,8 @@ def test_state_filter_narrows_focus_but_keeps_national_context(client, session):
     user = _user(session)
     b = client.get("/api/v1/demo-esg-dashboard/climate/district/scores",
                    params={"state": "Kerala"}, headers=auth(user)).json()
-    assert b["district_count"] < 760          # focus narrowed
-    assert len(b["scores"]) == 760            # whole country still returned
+    assert b["district_count"] < 724          # focus narrowed
+    assert len(b["scores"]) == 724            # whole country still returned
     assert all(s["in_focus"] for s in b["scores"] if s["state"] == "Kerala")
     assert not any(s["in_focus"] for s in b["scores"] if s["state"] == "Punjab")
 

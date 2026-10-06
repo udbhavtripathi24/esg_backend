@@ -1,0 +1,6 @@
+# Dependencies for the one-off scripts in this folder only.
+# Deliberately NOT in the main requirements.txt: these are needed to
+# convert boundary data when it changes, not to run the API, and adding
+# them to the runtime image would carry weight for no benefit.
+pyshp==3.1.6      # read ESRI shapefiles (.shp/.dbf/.shx)
+pyproj==3.8.0     # reproject from UTM / Lambert etc. to WGS84
