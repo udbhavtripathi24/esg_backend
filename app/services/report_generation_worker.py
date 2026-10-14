@@ -78,6 +78,9 @@ def generate_report_version(session: Session, report_version_id: int, job_id: in
     if not company:
         raise ReportGenerationError(f"Company {report.company_id} not found")
 
+    if report.report_type == "brsr":
+        return _generate_brsr(session, report, rv, snapshot)
+
     # ---- Resolve all data referenced by the (already frozen) snapshot ----
     kpi_value_rows = session.exec(
         select(KpiValue).where(KpiValue.id.in_(snapshot.kpi_value_ids))
@@ -144,3 +147,58 @@ def generate_report_version(session: Session, report_version_id: int, job_id: in
     session.refresh(artifact)
 
     return {"status": "generated", "artifact_id": artifact.id, "size_bytes": stored.size_bytes}
+
+
+def _generate_brsr(session: Session, report: Report, rv: ReportVersion, snapshot: ReportSnapshot) -> dict:
+    """BRSR branch. Same safety design as the generic path above: build and
+    validate everything in memory, write storage, then ONE database commit.
+
+    The document is built only from ``snapshot.configuration['brsr']`` —
+    the answers frozen when the version was created — never from the live
+    answer tables, so later edits cannot change an existing version.
+    PDF is best-effort: if LibreOffice is unavailable or conversion fails,
+    the Word report is still produced and the failure is logged.
+    """
+    import io
+    from app.brsr.docx_report import build_brsr_docx, validate_brsr_docx, docx_to_pdf, pdf_available
+
+    frozen = (snapshot.configuration or {}).get("brsr")
+    if not frozen:
+        raise ReportGenerationError(f"Snapshot for ReportVersion {rv.id} has no frozen BRSR answers")
+
+    doc_bytes = build_brsr_docx(frozen, draft=False)
+    errors = validate_brsr_docx(doc_bytes)
+    if errors:
+        raise ReportGenerationError(f"Technical validation failed: {'; '.join(errors)}")
+
+    storage = get_storage()
+    base = f"companies/{report.company_id}/reports/{report.public_id}/versions/v{rv.version_number}"
+    fy = frozen["financial_year"]
+    outputs = [("docx", doc_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")]
+    if pdf_available():
+        try:
+            outputs.append(("pdf", docx_to_pdf(doc_bytes), "application/pdf"))
+        except Exception as exc:  # noqa: BLE001 - PDF must never block the Word report
+            log.warning(f"BRSR PDF conversion failed for report_version_id={rv.id}: {exc}")
+
+    stored_rows = []
+    for fmt, data, mime in outputs:
+        key = f"{base}/BRSR_FY{fy}.{fmt}"
+        stored = storage.put(key, io.BytesIO(data), mime)
+        stored_rows.append((fmt, key, stored))
+
+    for fmt, key, stored in stored_rows:
+        session.add(ReportArtifact(
+            report_version_id=rv.id, format=fmt, storage_key=key,
+            original_filename=f"BRSR_FY{fy}_v{rv.version_number}.{fmt}",
+            mime_type=stored.mime_type, size_bytes=stored.size_bytes, sha256_checksum=stored.sha256_checksum,
+        ))
+    rv.status = "generated"
+    rv.generation_completed_at = datetime.utcnow()
+    session.add(rv)
+    log_action(session, None, "report.generation.completed", "report_version", rv.id, rv.public_id,
+               company_id=report.company_id,
+               changes={"report_type": "brsr", "formats": [r[0] for r in stored_rows],
+                        "content_hash": snapshot.content_hash})
+    session.commit()
+    return {"status": "generated", "formats": [r[0] for r in stored_rows]}

@@ -17,3 +17,5 @@ from app.models.notification import Notification, NotificationOutbox  # noqa: F4
 from app.models.kpi import KpiDefinition, KpiValue  # noqa: F401
 # Report Generation
 from app.models.report import Report, ReportVersion, ReportSnapshot, ReportArtifact, ReportTemplate  # noqa: F401
+# BRSR questionnaire
+from app.models.brsr import BrsrResponseSet, BrsrSection, BrsrAnswer, BrsrAnswerHistory, BrsrComment  # noqa: F401

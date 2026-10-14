@@ -7,9 +7,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps for psycopg2
+# System deps for psycopg2.
+# libreoffice-writer-nogui + Carlito (metric-compatible with Calibri) power the
+# BRSR PDF export (app/brsr/docx_report.py:docx_to_pdf). Without them the Word
+# report still generates; PDF download returns a clear "not available" error.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
+    build-essential libpq-dev \
+    libreoffice-writer-nogui fonts-crosextra-carlito fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt

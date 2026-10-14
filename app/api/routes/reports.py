@@ -90,15 +90,35 @@ def _find_report_and_version(session: Session, actor: User, report_public_id: st
     return report, rv
 
 
-def _get_or_create_default_template(session: Session, actor: User) -> ReportTemplate:
+REPORT_TYPES = {"esg_management_report": "Default v1", "brsr": "SEBI BRSR (circular 2023/122) v1"}
+
+
+def _get_or_create_default_template(session: Session, actor: User, report_type: str = "esg_management_report") -> ReportTemplate:
     t = session.exec(select(ReportTemplate).where(
-        ReportTemplate.report_type == "esg_management_report", ReportTemplate.is_active == True  # noqa: E712
+        ReportTemplate.report_type == report_type, ReportTemplate.is_active == True  # noqa: E712
     ).order_by(ReportTemplate.version.desc())).first()
     if t:
         return t
-    t = ReportTemplate(report_type="esg_management_report", version=1, name="Default v1", created_by=actor.id)
+    t = ReportTemplate(report_type=report_type, version=1, name=REPORT_TYPES[report_type], created_by=actor.id)
     session.add(t); session.commit(); session.refresh(t)
     return t
+
+
+def _brsr_snapshot_for(session: Session, company_id: int, period_start: date, period_end: date) -> dict:
+    """BRSR reports cover exactly one Indian financial year (1 Apr – 31 Mar)
+    and are generated only from a fully approved BRSR response set."""
+    from app.brsr import service as brsr_service
+    from app.models.brsr import BrsrResponseSet
+    if not (period_start.month == 4 and period_start.day == 1 and period_end.month == 3 and period_end.day == 31
+            and period_end.year == period_start.year + 1):
+        raise AppError("invalid_period", "A BRSR report covers one financial year: 1 April to 31 March.", 422,
+                       "reporting_period_start")
+    fy = f"{period_start.year}-{str(period_end.year)[-2:]}"
+    rs = session.exec(select(BrsrResponseSet).where(
+        BrsrResponseSet.company_id == company_id, BrsrResponseSet.financial_year == fy)).first()
+    if not rs:
+        raise AppError("brsr_not_started", f"No BRSR responses exist for FY {fy} yet.", 422)
+    return brsr_service.frozen_snapshot(session, rs)
 
 
 def _create_version_with_snapshot(session: Session, report: Report, actor: User, version_number: int) -> ReportVersion:
@@ -106,7 +126,11 @@ def _create_version_with_snapshot(session: Session, report: Report, actor: User,
     real database unique constraint (report_id, version_number) to make
     concurrent duplicate-version creation fail safely — see module
     docstring."""
-    template = _get_or_create_default_template(session, actor)
+    template = _get_or_create_default_template(session, actor, report.report_type)
+    # Resolve BRSR inputs BEFORE creating the version, so an unapproved
+    # response set fails cleanly with 422 instead of leaving a stuck version.
+    brsr_frozen = (_brsr_snapshot_for(session, report.company_id, report.reporting_period_start,
+                                      report.reporting_period_end) if report.report_type == "brsr" else None)
     rv = ReportVersion(
         report_id=report.id, version_number=version_number, status="generating",
         template_id=template.id, created_by=actor.id, generation_started_at=datetime.utcnow(),
@@ -119,13 +143,20 @@ def _create_version_with_snapshot(session: Session, report: Report, actor: User,
         raise AppError("version_conflict", "A version with this number was just created by another request.", 409)
     session.refresh(rv)
 
-    resolved = resolve_snapshot_inputs(session, report.company_id, report.reporting_period_start, report.reporting_period_end)
-    content_hash = compute_content_hash(session, resolved["kpi_value_ids"])
-    snap = ReportSnapshot(
-        report_version_id=rv.id, dataset_version_ids=resolved["dataset_version_ids"],
-        kpi_value_ids=resolved["kpi_value_ids"], evidence_file_ids=resolved["evidence_file_ids"],
-        configuration={}, content_hash=content_hash,
-    )
+    if brsr_frozen is not None:
+        resolved = {"dataset_version_ids": [], "kpi_value_ids": [], "evidence_file_ids": []}
+        snap = ReportSnapshot(
+            report_version_id=rv.id, dataset_version_ids=[], kpi_value_ids=[], evidence_file_ids=[],
+            configuration={"brsr": brsr_frozen}, content_hash=brsr_frozen["content_hash"],
+        )
+    else:
+        resolved = resolve_snapshot_inputs(session, report.company_id, report.reporting_period_start, report.reporting_period_end)
+        content_hash = compute_content_hash(session, resolved["kpi_value_ids"])
+        snap = ReportSnapshot(
+            report_version_id=rv.id, dataset_version_ids=resolved["dataset_version_ids"],
+            kpi_value_ids=resolved["kpi_value_ids"], evidence_file_ids=resolved["evidence_file_ids"],
+            configuration={}, content_hash=content_hash,
+        )
     session.add(snap)
     job = ProcessingJob(
         job_type="generate_report", subject_type="report_version", subject_id=rv.id,
@@ -187,6 +218,11 @@ def create_report(
     actor: User = Depends(require_permission("report:generate")),
 ):
     target_company_id = _resolve_target_company_id(session, actor, body.company_id)
+    if body.report_type not in REPORT_TYPES:
+        raise AppError("invalid_report_type", f"report_type must be one of {sorted(REPORT_TYPES)}", 422, "report_type")
+    if body.report_type == "brsr":
+        # Fail before creating anything if the BRSR is not fully approved.
+        _brsr_snapshot_for(session, target_company_id, body.reporting_period_start, body.reporting_period_end)
 
     existing = session.exec(select(Report).where(
         Report.company_id == target_company_id, Report.report_type == body.report_type,
@@ -263,6 +299,8 @@ class ReportVersionDetailRead(ReportVersionRead):
     dataset_version_ids: list[int]
     kpi_value_count: int
     artifact_available: bool
+    formats: list[str] = []
+    content_hash: Optional[str] = None
     failure_reason: Optional[str]
 
 
@@ -270,13 +308,16 @@ class ReportVersionDetailRead(ReportVersionRead):
 def get_report_version(report_public_id: str, version_public_id: str, session: Session = Depends(get_session), actor: User = Depends(require_permission("report:read"))):
     report, rv = _find_report_and_version(session, actor, report_public_id, version_public_id)
     snap = session.exec(select(ReportSnapshot).where(ReportSnapshot.report_version_id == rv.id)).first()
-    artifact = session.exec(select(ReportArtifact).where(ReportArtifact.report_version_id == rv.id)).first()
+    artifacts = session.exec(select(ReportArtifact).where(ReportArtifact.report_version_id == rv.id)).all()
     return ReportVersionDetailRead(
         public_id=rv.public_id, version_number=rv.version_number, status=rv.status,
         created_at=rv.created_at, generation_completed_at=rv.generation_completed_at, published_at=rv.published_at,
         dataset_version_ids=snap.dataset_version_ids if snap else [],
         kpi_value_count=len(snap.kpi_value_ids) if snap else 0,
-        artifact_available=artifact is not None, failure_reason=rv.failure_reason,
+        artifact_available=any(a.format == "docx" for a in artifacts),
+        formats=sorted({a.format for a in artifacts}),
+        content_hash=snap.content_hash if snap else None,
+        failure_reason=rv.failure_reason,
     )
 
 
@@ -362,11 +403,13 @@ def publish_report(report_public_id: str, version_public_id: str, session: Sessi
 
 @router.get("/{report_public_id}/versions/{version_public_id}/download")
 def download_report(report_public_id: str, version_public_id: str, request: Request,
+                    format: str = Query("docx", pattern="^(docx|pdf)$"),
                     session: Session = Depends(get_session), actor: User = Depends(require_permission("report:read"))):
     report, rv = _find_report_and_version(session, actor, report_public_id, version_public_id)
-    artifact = session.exec(select(ReportArtifact).where(ReportArtifact.report_version_id == rv.id)).first()
+    artifact = session.exec(select(ReportArtifact).where(
+        ReportArtifact.report_version_id == rv.id, ReportArtifact.format == format)).first()
     if not artifact:
-        raise NotFoundError("No artifact is available for this report version yet")
+        raise NotFoundError(f"No {format.upper()} file is available for this report version")
     signed = get_storage().signed_url(artifact.storage_key, expires_in=300)
     log_action(session, actor, "report.downloaded", "report_artifact", artifact.id, artifact.public_id, company_id=report.company_id,
               ip_address=request.client.host if request.client else None)
