@@ -111,10 +111,10 @@ class ReportSnapshot(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     report_version_id: int = Field(foreign_key="report_versions.id", index=True)
-    dataset_version_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON))
-    kpi_value_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON))
-    evidence_file_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON))
-    configuration: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    dataset_version_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    kpi_value_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    evidence_file_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    configuration: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
     content_hash: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

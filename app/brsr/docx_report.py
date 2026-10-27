@@ -444,7 +444,8 @@ def build_brsr_docx(snapshot: dict, *, draft: bool = False, generated_at: Option
     frozen payload from app/brsr/service.py:frozen_snapshot()."""
     fy = snapshot["financial_year"]
     labels = financial_year_labels(fy)
-    answers = snapshot["answers"]
+    # Fill every table built from the annual data before rendering.
+    answers = engine.apply_derivations(snapshot["answers"])
     company = snapshot.get("company_name") or ""
 
     doc = Document()
@@ -489,6 +490,8 @@ def build_brsr_docx(snapshot: dict, *, draft: bool = False, generated_at: Option
 
     r = _Renderer(doc, answers, labels, draft)
     for s in SECTIONS:
+        if s.get("kind") == "data":
+            continue  # annual data feeds the tables; it is not a BRSR section itself
         code = s["code"]
         heading = s["title"] if code in ("A", "B") else f"{s['title']}: {s['statement']}"
         if code == "P1":

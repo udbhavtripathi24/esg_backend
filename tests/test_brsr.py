@@ -31,8 +31,12 @@ API = "/api/v1/brsr"
 # Engine units
 # ===========================================================================
 
+DATA_AREAS = ["WF", "BD", "WB", "TR", "WG", "HS", "HC", "GR", "EN", "WA", "WS", "FN", "OP"]
+
+
 def test_bank_covers_every_sebi_section():
-    assert SECTION_CODES == ["A", "B"] + [f"P{i}" for i in range(1, 10)]
+    # Short annual data form first, then the SEBI disclosure sections
+    assert SECTION_CODES == DATA_AREAS + ["A", "B"] + [f"P{i}" for i in range(1, 10)]
     for code in SECTION_CODES:
         assert any(q["section"] == code for q in QUESTIONS), code
     # Spot-check SEBI items that must exist
@@ -41,6 +45,37 @@ def test_bank_covers_every_sebi_section():
         assert qid in QUESTIONS_BY_ID
     # Leadership indicators are voluntary under SEBI's format
     assert all(not q["required"] for q in QUESTIONS if q.get("indicator") == "leadership")
+    # Every question is routed to at least one department
+    assert all(q.get("departments") for q in QUESTIONS if not q.get("helper")), \
+        [q["id"] for q in QUESTIONS if not q.get("helper") and not q.get("departments")]
+
+
+def test_annual_form_is_short_and_drives_the_quantitative_tables():
+    from app.brsr.annual_data import DERIVE, METRICS
+    data_qs = [q for q in QUESTIONS if q["type"] == "metrics"]
+    assert [q["section"] for q in data_qs] == DATA_AREAS
+    # The client types one short list of annual figures instead of ~40 SEBI tables
+    assert len(METRICS) < 260 and len(DERIVE) >= 35
+    for qid in ("A.20a", "A.22", "P3.E1a", "P3.E9", "P6.E1", "P6.E7", "P6.E9", "P5.E3b"):
+        assert QUESTIONS_BY_ID[qid]["derive"], qid
+    required_disclosures = [q for q in QUESTIONS if q["required"] and q["type"] != "metrics"]
+    assert len(required_disclosures) < 75
+
+
+def test_hidden_worker_groups_count_as_zero_and_tables_still_build():
+    # Before the worker headcount is known, nothing is hidden or assumed
+    a = {"D.WF": engine.normalize_answer("D.WF", {"values": {"emp_perm_m": 6}})}
+    assert engine.hidden_groups(QUESTIONS_BY_ID["D.WF"], a) == []
+    assert engine.metric_values(a)["cy"].get("da_wrk_perm_m") is None
+    zero_workers = {"wrk_perm_m": 0, "wrk_perm_f": 0, "wrk_oth_m": 0, "wrk_oth_f": 0}
+    a = {"D.WF": engine.normalize_answer("D.WF", {"values": {"emp_perm_m": 6, "emp_perm_f": 4, **zero_workers}})}
+    vals = engine.metric_values(a)["cy"]
+    assert vals["da_wrk_perm_m"] == 0 and vals["emp_perm_m"] == 6  # worker follow-ups hidden -> 0
+    missing = engine.metric_fields_missing(QUESTIONS_BY_ID["D.WF"], a["D.WF"], a)
+    assert "da_wrk_perm_m" not in missing and "emp_oth_m" in missing
+    # Once the entity has workers, their follow-up questions are asked
+    a["D.WF"] = engine.normalize_answer("D.WF", {"values": {"emp_perm_m": 6, **zero_workers, "wrk_perm_m": 3}})
+    assert "da_wrk_perm_m" in engine.metric_fields_missing(QUESTIONS_BY_ID["D.WF"], a["D.WF"], a)
 
 
 @pytest.mark.parametrize("expr", ["__import__('os')", "a.b", "(lambda: 1)()", "a[0]", "open('x')", "a if b else c"])
@@ -57,47 +92,73 @@ def test_formula_missing_values_and_division_by_zero():
     assert F.evaluate("div(a * 365, b)", {"a": 10, "b": 365}.get) == 10
 
 
-def test_computed_cells_are_never_stored_even_if_sent():
-    v = engine.normalize_answer("P3.E9", {"cells": {"emp_male": {"cy_total": 10, "cy_reviewed": 5, "cy_pct": 99},
-                                                    "emp_total": {"cy_total": 999}}})
-    assert v["cells"] == {"emp_male": {"cy_total": 10, "cy_reviewed": 5}}
+def test_derived_cells_are_never_stored_even_if_sent():
+    # P3.E9 is built entirely from the annual data: nothing the client sends is kept
+    v = engine.normalize_answer("P3.E9", {"cells": {"emp_male": {"cy_total": 10, "cy_reviewed": 5, "cy_pct": 99}},
+                                          "na": True, "na_reason": "x"})
+    assert v == {"cells": {}}
+    # A.25 is hybrid: the mechanism column stays the client's, the counts are derived
+    v = engine.normalize_answer("A.25", {"cells": {"investors": {"mechanism": "Yes", "cy_filed": 5}}})
+    assert v["cells"] == {"investors": {"mechanism": "Yes"}}
 
 
 def test_the_112_percent_error_in_the_reference_filing_is_impossible():
-    # The filing divided male reviews (2,862) by permanent male employees (2,551).
-    a = {"P3.E9": engine.normalize_answer("P3.E9", {"cells": {"emp_male": {"cy_total": 2551, "cy_reviewed": 2862}}})}
-    issues = engine.validate_answer("P3.E9", a["P3.E9"], a)
-    assert any(i["level"] == "error" and "cannot exceed" in i["message"] for i in issues)
-    a = {"P3.E9": engine.normalize_answer("P3.E9", {"cells": {"emp_male": {"cy_total": 2957, "cy_reviewed": 2862}}})}
-    assert engine.validate_answer("P3.E9", a["P3.E9"], a) == []
+    # The filing divided male reviews (2,862) by permanent male employees only (2,551).
+    a = {"D.WF": engine.normalize_answer("D.WF", {"values": {"emp_perm_m": 2551, "emp_oth_m": 0}}),
+         "D.TR": engine.normalize_answer("D.TR", {"values": {"rev_emp_m": 2862}})}
+    issues = engine.validate_answer("D.TR", a["D.TR"], a)
+    assert any(i["level"] == "error" and "cannot exceed" in i["message"] and "2,862" in i["message"] for i in issues)
+    # With contract staff counted the review count fits, and the percentage is built, not typed
+    a["D.WF"] = engine.normalize_answer("D.WF", {"values": {"emp_perm_m": 2551, "emp_oth_m": 406}})
+    assert engine.validate_answer("D.TR", a["D.TR"], a) == []
     assert round(engine.compute_table("P3.E9", a)["emp_male"]["cy_pct"], 2) == 96.79
 
 
-def test_totals_rows_are_computed_and_constraints_apply_to_them():
-    a = {"A.20a": engine.normalize_answer("A.20a", {"cells": {
-        "employees_perm": {"total": 10, "male": 6, "female": 4},
-        "employees_other": {"total": 5, "male": 2, "female": 3}}})}
+def test_electricity_unit_mistake_is_flagged_for_office_entities():
+    head = {"emp_perm_m": 2000, "emp_perm_f": 1000, "wrk_perm_m": 0, "wrk_perm_f": 0, "wrk_oth_m": 0, "wrk_oth_f": 0}
+    a = {"D.WF": engine.normalize_answer("D.WF", {"values": head}),
+         "D.OP": engine.normalize_answer("D.OP", {"values": {"plants_national": 0, "plants_international": 0}}),
+         # The filing's 4,192,242.84 was kWh; typed as GJ and converted it becomes ~1.16 bn kWh
+         "D.EN": engine.normalize_answer("D.EN", {"values": {"elec_ren_kwh": 4192242.84 / 0.0036}})}
+    w = [i for i in engine.validate_answer("D.EN", a["D.EN"], a) if i["level"] == "warning"]
+    assert len(w) == 1 and "Check the unit" in w[0]["message"] and w[0]["path"] == "values.elec_ren_kwh"
+    a["D.EN"] = engine.normalize_answer("D.EN", {"values": {"elec_ren_kwh": 4192242.84}})
+    assert engine.validate_answer("D.EN", a["D.EN"], a) == []
+    # A manufacturer may legitimately use that much: no warning once it has plants
+    a["D.EN"] = engine.normalize_answer("D.EN", {"values": {"elec_ren_kwh": 4192242.84 / 0.0036}})
+    a["D.OP"] = engine.normalize_answer("D.OP", {"values": {"plants_national": 3}})
+    assert engine.validate_answer("D.EN", a["D.EN"], a) == []
+
+
+def test_tables_and_totals_are_built_from_headcount():
+    a = {"D.WF": engine.normalize_answer("D.WF", {"values": {
+        "emp_perm_m": 6, "emp_perm_f": 4, "emp_oth_m": 2, "emp_oth_f": 3}})}
     g = engine.compute_table("A.20a", a)
     assert g["employees_total"] == {"total": 15, "male": 8, "male_pct": pytest.approx(53.333, 0.01),
                                     "female": 7, "female_pct": pytest.approx(46.667, 0.01)}
+    # The same headcount feeds P3 — the two tables cannot disagree any more
+    d = engine.apply_derivations(a)
+    assert d["P3.E1a"]["cells"]["perm_male"]["total"] == 6
+    assert d["A.20a"]["cells"]["employees_perm"]["male"] == 6
 
 
 def test_intensities_use_the_single_revenue_figure_and_ppp():
-    a = {
-        "P6.DEN": engine.normalize_answer("P6.DEN", {"cells": {"revenue": {"cy_v": 1_000_000}, "ppp_factor": {"cy_v": 20}}}),
-        "P6.E1": engine.normalize_answer("P6.E1", {"cells": {"ren_elec": {"cy_v": 300}, "non_elec": {"cy_v": 700}}}),
-    }
+    a = {"D.FN": engine.normalize_answer("D.FN", {"values": {"revenue": 1_000_000, "ppp_factor": 20}}),
+         "D.EN": engine.normalize_answer("D.EN", {"values": {"elec_ren_kwh": 300 / 0.0036,
+                                                             "elec_nonren_kwh": 700 / 0.0036}})}
     g = engine.compute_table("P6.E1", a)
-    assert g["total"]["cy_v"] == 1000
+    assert g["total"]["cy_v"] == pytest.approx(1000)
     assert g["int_rupee"]["cy_v"] == pytest.approx(0.001)
     assert g["int_ppp"]["cy_v"] == pytest.approx(0.02)
     assert g["int_rupee"]["py_v"] is None  # no previous-year revenue -> blank, never 0
 
 
 def test_not_applicable_needs_a_reason():
-    a = {"P6.E4": engine.normalize_answer("P6.E4", {"na": True, "na_reason": ""})}
-    assert any(i["level"] == "error" for i in engine.validate_answer("P6.E4", a["P6.E4"], a))
-    assert not engine.is_answered(QUESTIONS_BY_ID["P6.E4"], a["P6.E4"])
+    a = {"P6.E6": engine.normalize_answer("P6.E6", {"na": True, "na_reason": ""})}
+    assert any(i["level"] == "error" for i in engine.validate_answer("P6.E6", a["P6.E6"], a))
+    assert not engine.is_answered(QUESTIONS_BY_ID["P6.E6"], a["P6.E6"])
+    a = {"P6.E6": engine.normalize_answer("P6.E6", {"na": True, "na_reason": "No such emissions in our offices."})}
+    assert engine.is_answered(QUESTIONS_BY_ID["P6.E6"], a["P6.E6"])
 
 
 def test_conditional_requirement():
@@ -121,17 +182,9 @@ def test_cin_email_and_percent_formats():
     a = {"A.I": engine.normalize_answer("A.I", {"fields": {"cin": "L123", "email": "nope", "paid_up_capital": -5}})}
     msgs = " | ".join(i["message"] for i in engine.validate_answer("A.I", a["A.I"], a))
     assert "invalid format" in msgs and "e-mail" in msgs and "negative" in msgs
-    a = {"A.19b": engine.normalize_answer("A.19b", {"value": "120"})}
-    assert any("100%" in i["message"] for i in engine.validate_answer("A.19b", a["A.19b"], a))
-
-
-def test_cross_question_consistency_warning():
-    a = {
-        "A.20a": engine.normalize_answer("A.20a", {"cells": {"employees_perm": {"total": 10, "male": 6, "female": 4}}}),
-        "P3.E1a": engine.normalize_answer("P3.E1a", {"cells": {"perm_male": {"total": 7}}}),
-    }
-    w = engine.consistency_warnings(a)
-    assert any("P3 1(a)" in x["message"] and "7 vs 6" in x["message"] for x in w)
+    # Exports can never exceed turnover now that A.19b is computed from them
+    a = {"D.FN": engine.normalize_answer("D.FN", {"values": {"turnover": 100, "exports": 120}})}
+    assert any("cannot exceed" in i["message"] for i in engine.validate_answer("D.FN", a["D.FN"], a))
 
 
 def test_structurally_invalid_payloads_are_rejected():
@@ -224,7 +277,9 @@ def test_create_set_rules(client, session):
         r = client.post(f"{API}/response-sets", json={"financial_year": bad}, headers=auth(w["uploader"]))
         assert r.status_code == 422, bad
     ov = client.get(f"{API}/response-sets/{set_id}", headers=auth(w["uploader"])).json()
-    assert [s["status"] for s in ov["sections"]] == ["draft"] * 11
+    assert [s["status"] for s in ov["sections"]] == ["draft"] * len(SECTION_CODES)
+    assert [s["code"] for s in ov["sections"]] == SECTION_CODES
+    assert [s["kind"] for s in ov["sections"]] == ["data"] * len(DATA_AREAS) + ["disclosure"] * 11
     assert ov["fy_labels"]["cy"] == "FY 2024-25"
 
 
@@ -244,15 +299,24 @@ def test_other_companies_cannot_see_or_edit(client, session):
 def test_save_returns_computed_values_and_issues(client, session):
     w = _world(session)
     set_id = _create(client, w["uploader"])
-    r = _save(client, w["uploader"], set_id, {"P3.E9": {"cells": {"emp_male": {"cy_total": 2551, "cy_reviewed": 2862}}}})
+    workers = {"wrk_perm_m": 0, "wrk_perm_f": 0, "wrk_oth_m": 0, "wrk_oth_f": 0}
+    r = _save(client, w["uploader"], set_id, {"D.WF": {"values": {"emp_perm_m": 2551, "emp_oth_m": 0, **workers}},
+                                              "D.TR": {"values": {"rev_emp_m": 2862}}})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["saved"] == ["P3.E9"]
-    a = body["answers"]["P3.E9"]
+    assert sorted(body["saved"]) == ["D.TR", "D.WF"]
+    a = body["answers"]["D.TR"]
     assert a["revision"] == 1
-    assert round(a["computed"]["emp_male"]["cy_pct"], 2) == 112.19
     assert any("cannot exceed" in i["message"] for i in a["issues"])
-    assert body["sections"]["P3"]["ready_to_submit"] is False
+    assert body["sections"]["TR"]["ready_to_submit"] is False
+    # The derived P3 table reflects the saved figures straight away
+    # Worker follow-up groups are not asked once the entity reports no workers
+    wf = client.get(f"{API}/response-sets/{set_id}/sections/WF", headers=auth(w["uploader"])).json()["answers"]["D.WF"]
+    hidden = [QUESTIONS_BY_ID["D.WF"]["groups"][i]["title"] for i in wf["hidden_groups"]]
+    assert hidden and all("workers" in t for t in hidden)
+    assert "emp_perm_f" in wf["missing_fields"] and "da_wrk_perm_m" not in wf["missing_fields"]
+    p3 = client.get(f"{API}/response-sets/{set_id}/sections/P3", headers=auth(w["uploader"])).json()
+    assert round(p3["answers"]["P3.E9"]["computed"]["emp_male"]["cy_pct"], 2) == 112.19
 
 
 def test_unknown_question_and_bad_shape_rejected(client, session):
@@ -308,9 +372,9 @@ def test_full_journey_review_and_brsr_report(client, session, tmp_path):
     r = _save(client, w["uploader"], set_id, {"A.19c": {"text": "edit"}}, {"A.19c": 1})
     assert r.status_code == 409 and r.json()["error"]["code"] == "section_locked"
 
-    # Review queue shows the 11 submitted sections to the reviewer
+    # Review queue shows every submitted section to the reviewer
     q = client.get(f"{API}/review-queue", headers=auth(w["reviewer"])).json()
-    assert len(q) == 11 and {x["section"] for x in q} == set(SECTION_CODES)
+    assert len(q) == len(SECTION_CODES) and {x["section"] for x in q} == set(SECTION_CODES)
 
     # Segregation of duties: the submitter cannot approve (a client approver role could otherwise)
     approver = make_user(session, "appr@client.com", "client", "Client Approver", company=w["co"])
@@ -447,15 +511,15 @@ def test_previous_year_is_carried_forward_from_approved_answers(client, session)
     _approve_all(client, w["reviewer"], set_id)
 
     new_id = _create(client, w["uploader"], "2025-26")
+    en = client.get(f"{API}/response-sets/{new_id}/sections/EN", headers=auth(w["uploader"])).json()
+    val = en["answers"]["D.EN"]["value"]
+    # last year's figures -> this year's previous-year column; this year starts blank
+    assert val["values"] == {} and val["py"]["elec_ren_kwh"] == 4192242.84
     p6 = client.get(f"{API}/response-sets/{new_id}/sections/P6", headers=auth(w["uploader"])).json()
-    cells = p6["answers"]["P6.E1"]["value"]["cells"]
-    assert cells["ren_elec"] == {"py_v": 4192242.84}  # last year's current FY -> this year's previous FY
-    assert "cy_v" not in cells["ren_elec"]
+    assert p6["answers"]["P6.E1"]["computed"]["ren_elec"]["py_v"] == pytest.approx(4192242.84 * 0.0036)
     a = client.get(f"{API}/response-sets/{new_id}/sections/A", headers=auth(w["uploader"])).json()
     assert a["answers"]["A.I"]["value"]["fields"]["cin"] == "L67110MH1993PLC344643"
     assert a["answers"]["A.I"]["value"]["fields"]["financial_year"] == "2025-26"
-    assert a["answers"]["A.22"]["value"]["cells"]["perm_employees"] == {"py_male": 23.38, "py_female": 26.47,
-                                                                        "py_total": 24.12}
     assert a["answers"]["A.19c"]["value"] is None  # narrative is not copied
     hist = session.exec(select(BrsrAnswerHistory).where(BrsrAnswerHistory.source == "carry_forward")).all()
     assert hist
@@ -472,3 +536,52 @@ def test_draft_preview_is_watermarked(client, session):
     body = "\n".join(p.text for p in doc.paragraphs)
     assert "DRAFT" in header and "Not for filing" in header
     assert "Retail and institutional clients." in body and "[Not yet answered]" in body
+
+
+def test_v1_response_set_is_upgraded_from_its_typed_tables(client, session):
+    """A set started on the v1 bank (tables typed directly) keeps its figures:
+    the upgrade rebuilds the annual data from those tables."""
+    from app.brsr.upgrade import upgrade_response_set
+    from app.models.brsr import BrsrAnswer, BrsrResponseSet
+
+    w = _world(session)
+    set_id = _create(client, w["uploader"])
+    rs = session.exec(select(BrsrResponseSet).where(BrsrResponseSet.public_id == set_id)).one()
+    norm = {q: engine.normalize_answer(q, v) for q, v in brsr_fixture.answers().items()}
+    v1 = {q: v for q, v in engine.apply_derivations(norm).items() if not q.startswith("D.")}
+    for qid, value in v1.items():
+        session.add(BrsrAnswer(response_set_id=rs.id, section_code=QUESTIONS_BY_ID[qid]["section"], question_id=qid,
+                               value=value, revision=1, updated_by=w["uploader"].id))
+    rs.bank_version = "sebi-2023-122.v1"
+    session.add(rs)
+    session.commit()
+    assert client.get(f"{API}/response-sets/{set_id}", headers=auth(w["uploader"])).json()["upgrade_pending"] is True
+
+    dry = upgrade_response_set(session, rs, dry_run=True)
+    assert dry["figures_filled"] > 250 and dry["conflicts"] == []
+    assert rs.bank_version == "sebi-2023-122.v1"  # dry run writes nothing
+
+    report = upgrade_response_set(session, rs)
+    assert report["figures_filled"] == dry["figures_filled"]
+    assert client.get(f"{API}/response-sets/{set_id}", headers=auth(w["uploader"])).json()["upgrade_pending"] is False
+    p3 = client.get(f"{API}/response-sets/{set_id}/sections/P3", headers=auth(w["uploader"])).json()
+    assert round(p3["answers"]["P3.E9"]["computed"]["emp_male"]["cy_pct"], 2) == 96.79
+    p6 = client.get(f"{API}/response-sets/{set_id}/sections/P6", headers=auth(w["uploader"])).json()
+    assert p6["answers"]["P6.E1"]["computed"]["ren_elec"]["cy_v"] == pytest.approx(4192242.84 * 0.0036)
+    wf = client.get(f"{API}/response-sets/{set_id}/sections/WF", headers=auth(w["uploader"])).json()
+    assert wf["answers"]["D.WF"]["value"]["values"]["emp_perm_m"] == 2551
+    # Turnover inputs were never typed in v1 -> left for the client
+    assert "emp_perm_m_start" in wf["answers"]["D.WF"]["missing_fields"]
+    hist = session.exec(select(BrsrAnswerHistory).where(BrsrAnswerHistory.source == "bank_upgrade")).all()
+    assert {h.question_id for h in hist} >= {"D.WF", "D.EN", "D.FN"}
+
+    # Idempotent, and never overwrites what the client has entered since
+    cur = wf["answers"]["D.WF"]["value"]
+    r = _save(client, w["uploader"], set_id, {"D.WF": {**cur, "values": {**cur["values"], "emp_perm_m": 2600}}},
+              {"D.WF": wf["answers"]["D.WF"]["revision"]})
+    assert r.status_code == 200, r.text
+    rs.bank_version = "sebi-2023-122.v1"
+    again = upgrade_response_set(session, rs)
+    assert again["figures_filled"] == 0
+    wf = client.get(f"{API}/response-sets/{set_id}/sections/WF", headers=auth(w["uploader"])).json()
+    assert wf["answers"]["D.WF"]["value"]["values"]["emp_perm_m"] == 2600

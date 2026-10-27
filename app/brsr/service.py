@@ -30,7 +30,7 @@ from sqlmodel import Session, select
 
 from app.brsr import engine
 from app.brsr.question_bank import (
-    BANK_VERSION, QUESTIONS, QUESTIONS_BY_ID, SECTION_CODES, financial_year_labels,
+    BANK_VERSION, QUESTIONS, QUESTIONS_BY_ID, SECTION_CODES, SECTIONS, financial_year_labels,
 )
 from app.core.errors import AppError, NotFoundError
 from app.core.tenancy import accessible_company_ids, can_access_company
@@ -97,17 +97,25 @@ def get_set(session: Session, actor: User, public_id: str) -> BrsrResponseSet:
 
 def sections_of(session: Session, rs: BrsrResponseSet) -> dict[str, BrsrSection]:
     rows = session.exec(select(BrsrSection).where(BrsrSection.response_set_id == rs.id)).all()
-    return {s.section_code: s for s in rows}
+    out = {s.section_code: s for s in rows}
+    missing = [c for c in SECTION_CODES if c not in out]
+    if missing:
+        # Response sets created before a section existed (e.g. the annual-data
+        # areas added in bank v2) get it on first access, as a draft.
+        for code in missing:
+            sec = BrsrSection(response_set_id=rs.id, section_code=code)
+            session.add(sec)
+            out[code] = sec
+        session.commit()
+        for code in missing:
+            session.refresh(out[code])
+    return out
 
 
 def get_section(session: Session, rs: BrsrResponseSet, code: str) -> BrsrSection:
     if code not in SECTION_CODES:
         raise NotFoundError("Section not found")
-    s = session.exec(select(BrsrSection).where(
-        BrsrSection.response_set_id == rs.id, BrsrSection.section_code == code)).first()
-    if not s:  # pragma: no cover - created with the set
-        raise NotFoundError("Section not found")
-    return s
+    return sections_of(session, rs)[code]
 
 
 def answer_rows(session: Session, rs: BrsrResponseSet) -> dict[str, BrsrAnswer]:
@@ -146,6 +154,10 @@ def _carry_forward_value(q: dict, prior: dict) -> Optional[dict]:
     if q["id"] == "A.I":
         fields = {k: v for k, v in (prior.get("fields") or {}).items() if k != "financial_year"}
         return {"fields": fields} if fields else None
+    if q["type"] == "metrics":
+        # Last year's approved annual data becomes this year's previous-year figures.
+        values = prior.get("values") or {}
+        return {"values": {}, "py": dict(values)} if values else None
     if q["type"] != "table" or prior.get("na"):
         return None
     cols = {c["key"]: c for c in q["columns"]}
@@ -455,6 +467,9 @@ def reopen_section(session: Session, actor: User, rs: BrsrResponseSet, code: str
 # Read models
 # ---------------------------------------------------------------------------
 
+SECTIONS_BY_CODE = {s["code"]: s for s in SECTIONS}
+
+
 def overview(session: Session, rs: BrsrResponseSet) -> dict:
     answers = answers_dict(session, rs)
     secs = sections_of(session, rs)
@@ -463,8 +478,9 @@ def overview(session: Session, rs: BrsrResponseSet) -> dict:
     for code in SECTION_CODES:
         s = secs[code]
         r = engine.section_report(code, answers)
+        meta = SECTIONS_BY_CODE[code]
         out_sections.append({
-            "code": code, "status": s.status, "submitted_at": s.submitted_at, "decided_at": s.decided_at,
+            "code": code, "kind": meta.get("kind", "disclosure"), "title": meta["title"], "status": s.status, "submitted_at": s.submitted_at, "decided_at": s.decided_at,
             "decision_note": s.decision_note, "submission_count": s.submission_count,
             "questions": r["questions"], "answered": r["answered"], "required": r["required"],
             "required_answered": r["required_answered"], "errors": len(r["errors"]),
@@ -473,7 +489,8 @@ def overview(session: Session, rs: BrsrResponseSet) -> dict:
     return {
         "public_id": rs.public_id, "company_id": rs.company_id, "company_name": company.name if company else None,
         "financial_year": rs.financial_year, "fy_labels": financial_year_labels(rs.financial_year),
-        "bank_version": rs.bank_version, "carried_forward": rs.carried_forward_from_id is not None,
+        "bank_version": rs.bank_version, "upgrade_pending": rs.bank_version != BANK_VERSION,
+        "carried_forward": rs.carried_forward_from_id is not None,
         "created_at": rs.created_at, "updated_at": rs.updated_at, "sections": out_sections,
         "all_approved": all(s["status"] == "approved" for s in out_sections),
     }
@@ -506,7 +523,9 @@ def section_detail(session: Session, rs: BrsrResponseSet, code: str) -> dict:
             "updated_at": a.updated_at if a else None,
             "computed": engine.computed_view(q["id"], answers, comp),
             "issues": issues_by_q.get(q["id"], []),
-            "answered": engine.is_answered(q, answers.get(q["id"])),
+            "answered": engine.is_answered(q, answers.get(q["id"]), answers),
+            "missing_fields": report["missing_fields"].get(q["id"], []) if q["type"] == "metrics" else [],
+            "hidden_groups": engine.hidden_groups(q, answers) if q["type"] == "metrics" else [],
             "required": q["id"] in required,
         }
 

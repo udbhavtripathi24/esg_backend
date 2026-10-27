@@ -15,8 +15,7 @@ log = get_logger("startup")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Stage 1: create tables directly for convenience. Alembic migrations are
-    # wired up (see alembic/) and are the authoritative path for schema changes.
+    # Alembic owns the schema; this only checks it (see init_db).
     init_db()
     log.info("startup_complete", environment=settings.ENVIRONMENT)
     yield

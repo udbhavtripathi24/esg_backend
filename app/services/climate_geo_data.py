@@ -31,8 +31,36 @@ DEMO_DISCLAIMER = (
 )
 
 _HERE = os.path.dirname(__file__)
+
+
+def _clean_districts(raw: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Drop placeholder names and duplicates from the extracted district list.
+
+    The boundary source carries one nameless whole-state outline per state,
+    which the extractor records as "Unknown". Those have no district polygon
+    on the map, so scoring them would produce rows the map can never colour
+    (and an "Unknown" entry in the highest/lowest-risk lists). A few states
+    also repeat a name. Both are filtered here rather than in the JSON so a
+    re-run of scripts/shapefile_to_map.py cannot reintroduce them.
+    """
+    cleaned: dict[str, list[str]] = {}
+    for state, districts in raw.items():
+        seen: set[str] = set()
+        keep: list[str] = []
+        for name in districts:
+            if not name or name.strip().lower() in {"unknown", "unnamed", ""}:
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            keep.append(name)
+        if keep:
+            cleaned[state] = keep
+    return cleaned
+
+
 with open(os.path.join(_HERE, "_india_districts.json"), encoding="utf-8") as fh:
-    STATE_DISTRICTS: dict[str, list[str]] = json.load(fh)
+    STATE_DISTRICTS: dict[str, list[str]] = _clean_districts(json.load(fh))
 
 STATES = sorted(STATE_DISTRICTS.keys())
 

@@ -273,4 +273,95 @@ def answers() -> dict:
     # A few leadership indicators (voluntary)
     a["P6.L5"] = {"text": "Board-approved Business Continuity Plan and Disaster Recovery Plan with regular testing."}
     a["P9.L1"] = {"text": "Company website."}
+
+    # ---- Quantitative tables now come from the annual data (bank v2) ------
+    from app.brsr.annual_data import DERIVE, DERIVED_STILL_REQUIRED
+    for qid in DERIVE:
+        if qid not in DERIVED_STILL_REQUIRED:
+            a.pop(qid, None)
+    # Hybrid tables: only the columns the client still types
+    a["A.25"] = {"cells": {k: {"mechanism": "Yes"} for k in ("communities", "investors", "shareholders",
+                                                                 "employees", "customers", "value_chain")}
+                 | {"other": {"mechanism": "NA"}}}
+    a["P3.E2"] = {"cells": {k: {"cy_deposited": "Yes", "py_deposited": "Yes"} for k in ("pf", "gratuity", "esi",
+                                                                                         "others")}}
+    a.update(annual_data())
     return a
+
+
+def annual_data() -> dict:
+    """The reference filing's quantitative disclosures as annual figures.
+    Where the filing gives only a rate, the inputs are chosen to reproduce it
+    (e.g. turnover rate 23.38% from start/end headcount and leavers)."""
+    zero = lambda *keys: {k: 0 for k in keys}  # noqa: E731
+    return {
+        "D.WF": {"values": {
+            "emp_perm_m": 2551, "emp_perm_f": 863, "emp_oth_m": 406, "emp_oth_f": 83,
+            **zero("wrk_perm_m", "wrk_perm_f", "wrk_oth_m", "wrk_oth_f"),
+            "da_emp_perm_m": 3, **zero("da_emp_perm_f", "da_emp_oth_m", "da_emp_oth_f"),
+            "emp_perm_m_start": 2500, "emp_perm_f_start": 840, "left_emp_perm_m": 590, "left_emp_perm_f": 225,
+        }, "py": {"emp_perm_m": 2500, "emp_perm_f": 840, "emp_oth_m": 380, "emp_oth_f": 80,
+                  **zero("wrk_perm_m", "wrk_perm_f", "wrk_oth_m", "wrk_oth_f")}},
+        "D.BD": {"values": {"bod_m": 8, "bod_f": 1, "kmp_m": 3, "kmp_f": 1}},
+        "D.WB": {"values": {
+            "wb_health_emp_perm_m": 2551, "wb_health_emp_perm_f": 863, "wb_accident_emp_perm_m": 2551,
+            "wb_accident_emp_perm_f": 863, "wb_maternity_emp_perm_f": 29, "wb_paternity_emp_perm_m": 114,
+            "wb_daycare_emp_perm_m": 0, "wb_daycare_emp_perm_f": 0,
+            "wb_health_emp_oth_m": 311, "wb_health_emp_oth_f": 52, "wb_accident_emp_oth_m": 311,
+            "wb_accident_emp_oth_f": 52, "wb_maternity_emp_oth_f": 1, "wb_paternity_emp_oth_m": 0,
+            "wb_daycare_emp_oth_m": 0, "wb_daycare_emp_oth_f": 0,
+            "wb_cost": 225913000, "ret_pf_emp": 3786, "ret_gratuity_emp": 3903, "ret_esi_emp": 39,
+            "ret_other_emp": 117,
+            "pl_emp_took_m": 114, "pl_emp_returned_m": 114, "pl_emp_retained_m": 108,
+            "pl_emp_took_f": 29, "pl_emp_returned_f": 27, "pl_emp_retained_f": 24,
+            "union_emp_perm_m": 0, "union_emp_perm_f": 0,
+        }},
+        "D.TR": {"values": {"tr_hs_emp_m": 1940, "tr_hs_emp_f": 646, "tr_skill_emp_m": 2500, "tr_skill_emp_f": 792,
+                            "tr_hr_emp_perm": 2586, "tr_hr_emp_oth": 385,
+                            # Correct denominators: the filing divided 2,862 by 2,551 and printed 112.19%.
+                            "rev_emp_m": 2862, "rev_emp_f": 915}},
+        "D.WG": {"values": {
+            **zero("mw_eq_emp_perm_m", "mw_eq_emp_perm_f", "mw_eq_emp_oth_m", "mw_eq_emp_oth_f"),
+            "mw_more_emp_perm_m": 2535, "mw_more_emp_perm_f": 857, "mw_more_emp_oth_m": 311, "mw_more_emp_oth_f": 52,
+            "med_bod_m": 3470000, "med_bod_f": 3190000, "med_kmp_m": 70014457.5, "med_kmp_f": 7823340,
+            "med_emp_n_m": 211, "med_emp_m": 2615177.5, "med_emp_n_f": 67, "med_emp_f": 1328150.5,
+            "wages_total": 10000000000, "wages_female": 1502063118,
+            "wages_rural": 0, "wages_semi_urban": 0, "wages_urban": 919120261, "wages_metro": 9080879739,
+        }},
+        "D.HS": {"values": {"lti_emp": 0, "hours_emp": 7806000, "recordable_emp": 0, "fatal_emp": 0,
+                            "highcons_emp": 0}, "py": {"hours_emp": 7500000}},
+        "D.HC": {"values": {**zero("cmp_wc_filed", "cmp_wc_pending", "cmp_hs_filed", "cmp_hs_pending",
+                                   "cmp_disc_filed", "cmp_disc_pending", "cmp_child_filed", "cmp_child_pending",
+                                   "cmp_forced_filed", "cmp_forced_pending", "cmp_wages_filed",
+                                   "cmp_wages_pending", "cmp_otherhr_filed", "cmp_otherhr_pending"),
+                            "cmp_sh_filed": 1, "cmp_sh_pending": 1, "cmp_sh_upheld": 1},
+                 "py": {"cmp_sh_filed": 2, "cmp_sh_pending": 0, "cmp_sh_upheld": 2}},
+        "D.GR": {"values": {**zero(*[f"ngrbc_{k}_{c}" for k in ("comm", "inv", "sh", "emp", "cust", "vc", "other")
+                                     for c in ("filed", "pending")]),
+                            **zero(*[f"cc_{k}_{c}" for k in ("privacy", "adv", "cyber", "ess", "rtp", "utp", "other")
+                                     for c in ("rec", "pending")]),
+                            **zero("coi_directors", "coi_kmps", "disc_directors", "disc_kmps", "disc_employees",
+                                   "disc_workers", "breaches", "pii_breaches")},
+                 "py": {"cc_other_rec": 1155, "cc_other_pending": 14}},
+        "D.EN": {"values": {"elec_ren_kwh": 4192242.84, "elec_nonren_kwh": 5795394.76, "fuel_ren_gj": 0,
+                            "fuel_nonren_gj": 0, "energy_other_ren_gj": 0, "energy_other_nonren_gj": 0,
+                            "scope1": 0, "scope2": 1170.35},
+                 "py": {"elec_ren_kwh": 2695950, "elec_nonren_kwh": 7667530, "scope1": 0, "scope2": 1548.42}},
+        "D.WA": {"values": {"w_surface": 0, "w_ground": 0, "w_third_party": 0, "w_sea": 0, "w_other": 20222.02,
+                            "w_consumption": 20222.02,
+                            **zero(*[f"wd_{d}_{t}" for d in ("surface", "ground", "sea", "third", "other")
+                                     for t in ("none", "treated")])},
+                 "py": {"w_other": 44188, "w_consumption": 44188}},
+        "D.WS": {"values": {"ws_plastic": 0, "ws_ewaste": 0.722, "ws_biomedical": 0, "ws_cnd": 0, "ws_battery": 0,
+                            "ws_radioactive": 0, "ws_other_haz": 0, "ws_other_nonhaz": 217.729,
+                            "ws_recycled": 0.722, "ws_reused": 0, "ws_other_recovery": 0,
+                            "ws_incineration": 0, "ws_landfill": 0, "ws_other_disposal": 0},
+                 "py": {"ws_ewaste": 0.34, "ws_other_nonhaz": 298}},
+        "D.FN": {"values": {"revenue": 41693400000, "turnover": 41693400000, "net_worth": 35000000000,
+                            "exports": 0, "csr_applicable": "Yes", "ppp_factor": 20.66,
+                            "payables": 1200000000, "cogs": 9500000000, "inputs_total": 1000000000,
+                            "inputs_msme": 462252685, "inputs_india": 999176902},
+                 "py": {"revenue": 38000000000, "ppp_factor": 20.3}},
+        "D.OP": {"values": {"plants_national": 0, "offices_national": 95, "plants_international": 0,
+                            "offices_international": 6, "states_served": 28, "countries_served": 6}},
+    }

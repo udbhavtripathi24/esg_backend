@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
 
     # --- Database ---
+    # Alembic is the only schema authority. Creating tables straight from the
+    # models on startup is a local-sandbox convenience only: it races with
+    # migrations (tables appear without an alembic_version row and the next
+    # `alembic upgrade` fails with DuplicateTable). Never honoured in production.
+    DB_AUTO_CREATE: bool = False
     # Local dev via docker-compose defaults to this Postgres. Never SQLite for
     # the real schema (JSONB, composite FKs, etc. are Postgres features we rely on).
     DATABASE_URL: str = "postgresql+psycopg2://esg:esg@localhost:5432/esg_platform"

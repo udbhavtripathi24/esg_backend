@@ -1257,11 +1257,172 @@ def _tag(section: str, items: list[dict]) -> list[dict]:
     return [{**q, "section": section} for q in items]
 
 
+# ---------------------------------------------------------------------------
+# Departments (engagement's department → question mapping). Questions built
+# from annual data inherit the departments of the areas they draw on.
+# ---------------------------------------------------------------------------
+
+DEPARTMENTS = ["Admin", "Secretarial", "ESG & CSR", "HR", "Finance", "ISG", "Client experience and Governance",
+               "CLC", "Legal", "Compliance", "Tech", "AP"]
+
+QUESTION_DEPARTMENTS: dict[str, list[str]] = {
+    'A.16': ['Finance'],
+    'A.17': ['Finance'],
+    'A.19a': ['Admin', 'Compliance'],
+    'A.19c': ['Finance'],
+    'A.23': ['Secretarial'],
+    'A.25': ['Client experience and Governance'],
+    'A.26': ['ESG & CSR'],
+    'A.I': ['ESG & CSR', 'Secretarial'],
+    'B.1': ['ESG & CSR', 'Secretarial'],
+    'B.10': ['ESG & CSR'],
+    'B.11': ['Secretarial'],
+    'B.12': ['ESG & CSR'],
+    'B.2': ['Secretarial'],
+    'B.3': ['Secretarial'],
+    'B.4': ['ESG & CSR'],
+    'B.5': ['ESG & CSR'],
+    'B.6': ['ESG & CSR'],
+    'B.7': ['ESG & CSR'],
+    'B.8': ['Secretarial'],
+    'B.9': ['Secretarial'],
+    'P1.E1': ['HR'],
+    'P1.E2a': ['Finance'],
+    'P1.E2b': ['Finance'],
+    'P1.E3': ['Legal'],
+    'P1.E4': ['HR'],
+    'P1.E7': ['Legal'],
+    'P1.E9': ['Finance'],
+    'P1.L1': ['HR'],
+    'P1.L2': ['Secretarial'],
+    'P2.E1': ['Tech'],
+    'P2.E2a': ['AP'],
+    'P2.E2b': ['AP'],
+    'P2.E3': ['Admin'],
+    'P2.E4': ['Admin'],
+    'P2.L1': ['ESG & CSR'],
+    'P2.L2': ['ESG & CSR'],
+    'P2.L3': ['Admin'],
+    'P2.L4': ['Admin'],
+    'P2.L5': ['Admin', 'Tech'],
+    'P3.E10a': ['Admin', 'HR'],
+    'P3.E10b': ['Admin', 'HR'],
+    'P3.E10c': ['HR'],
+    'P3.E10d': ['HR'],
+    'P3.E12': ['Admin', 'HR'],
+    'P3.E14': ['Admin', 'HR'],
+    'P3.E15': ['Admin', 'HR'],
+    'P3.E2': ['HR'],
+    'P3.E3': ['HR'],
+    'P3.E4': ['HR'],
+    'P3.E6': ['HR'],
+    'P3.L1': ['HR'],
+    'P3.L2': ['HR'],
+    'P3.L3': ['HR'],
+    'P3.L4': ['HR'],
+    'P3.L5': ['Admin'],
+    'P3.L6': ['Admin', 'HR'],
+    'P4.E1': ['ESG & CSR'],
+    'P4.E2': ['ESG & CSR'],
+    'P4.L1': ['ESG & CSR', 'Secretarial'],
+    'P4.L2': ['ESG & CSR'],
+    'P4.L3': ['ESG & CSR'],
+    'P5.E10': ['Compliance'],
+    'P5.E11': ['Compliance'],
+    'P5.E4': ['HR'],
+    'P5.E5': ['HR'],
+    'P5.E7': ['HR'],
+    'P5.E8': ['HR'],
+    'P5.E9': ['HR', 'Legal'],
+    'P5.L1': ['HR'],
+    'P5.L2': ['HR'],
+    'P5.L3': ['Admin', 'HR'],
+    'P5.L4': ['Compliance'],
+    'P5.L5': ['Admin', 'HR'],
+    'P6.E10': ['Admin'],
+    'P6.E11': ['ESG & CSR'],
+    'P6.E12': ['Admin'],
+    'P6.E13': ['ESG & CSR'],
+    'P6.E13b': ['ESG & CSR'],
+    'P6.E2': ['ESG & CSR'],
+    'P6.E5': ['Admin'],
+    'P6.E6': ['Admin'],
+    'P6.E8': ['ESG & CSR'],
+    'P6.L1a': ['Admin'],
+    'P6.L1b': ['Admin'],
+    'P6.L3': ['ESG & CSR'],
+    'P6.L4': ['Tech'],
+    'P6.L5': ['Tech'],
+    'P6.L6': ['Admin'],
+    'P6.L7': ['ESG & CSR'],
+    'P6.L8': ['ESG & CSR'],
+    'P7.E1a': ['Compliance'],
+    'P7.E1b': ['Compliance'],
+    'P7.E2': ['HR'],
+    'P7.L1': ['Secretarial'],
+    'P8.E1': ['ESG & CSR'],
+    'P8.E2': ['ESG & CSR'],
+    'P8.E3': ['ESG & CSR'],
+    'P8.L1': ['ESG & CSR'],
+    'P8.L2': ['ESG & CSR'],
+    'P8.L3a': ['ESG & CSR'],
+    'P8.L3b': ['ESG & CSR'],
+    'P8.L3c': ['ESG & CSR'],
+    'P8.L4': ['ESG & CSR'],
+    'P8.L5': ['Admin'],
+    'P8.L6': ['ESG & CSR'],
+    'P9.E1': ['Client experience and Governance'],
+    'P9.E2': ['Finance'],
+    'P9.E4': ['Client experience and Governance'],
+    'P9.E5': ['Finance', 'ISG'],
+    'P9.E6': ['ISG'],
+    'P9.E7': ['ISG'],
+    'P9.E7c': ['ISG'],
+    'P9.L1': ['Client experience and Governance'],
+    'P9.L2': ['Client experience and Governance'],
+    'P9.L3': ['Client experience and Governance'],
+    'P9.L4a': ['Client experience and Governance'],
+    'P9.L4b': ['Client experience and Governance'],
+}
+
+
 QUESTIONS: list[dict] = (
     _tag("A", SECTION_A) + _tag("B", SECTION_B) + _tag("P1", P1) + _tag("P2", P2) + _tag("P3", P3)
     + _tag("P4", P4) + _tag("P5", P5) + _tag("P6", P6) + _tag("P7", P7) + _tag("P8", P8) + _tag("P9", P9)
 )
 
+# --- Annual data: one "metrics" question per area, each area its own section
+from app.brsr import formula as _F  # noqa: E402
+from app.brsr.annual_data import AREAS, DERIVE, DERIVED_STILL_REQUIRED, METRIC_AREA, METRICS  # noqa: E402
+
+for _a in AREAS:
+    SECTIONS.insert(len([s for s in SECTIONS if s.get("kind") == "data"]),
+                    {"code": _a["code"], "title": _a["title"], "kind": "data", "intro": _a["intro"],
+                     "departments": _a["departments"]})
+for _s in SECTIONS:
+    _s.setdefault("kind", "disclosure")
+SECTION_CODES[:] = [s["code"] for s in SECTIONS]
+
+DATA_QUESTIONS = [{"id": f"D.{_a['code']}", "number": "", "prompt": _a["title"], "type": "metrics",
+                   "section": _a["code"], "group": _a["title"], "required": True, "groups": _a["groups"],
+                   "departments": _a["departments"]} for _a in AREAS]
+
+for _q in QUESTIONS:
+    if _q["id"] in DERIVE:
+        _src = set()
+        for _expr in DERIVE[_q["id"]].values():
+            _src |= {METRIC_AREA[n] for n in _F.names_in(_expr) if n in METRIC_AREA}
+        _q["derive"] = DERIVE[_q["id"]]
+        _q["derived_from"] = sorted(_src)
+        _q["required"] = _q["id"] in DERIVED_STILL_REQUIRED
+        _deps = set(QUESTION_DEPARTMENTS.get(_q["id"], []))
+        for _code in _src:
+            _deps |= set(next(a["departments"] for a in AREAS if a["code"] == _code))
+        _q["departments"] = sorted(_deps)
+    else:
+        _q["departments"] = QUESTION_DEPARTMENTS.get(_q["id"], ["ESG & CSR"])
+
+QUESTIONS = DATA_QUESTIONS + QUESTIONS
 QUESTIONS_BY_ID: dict[str, dict] = {q["id"]: q for q in QUESTIONS}
 
 # Conditional requirements: (question, depends_on, answer_that_makes_it_required)
@@ -1270,38 +1431,10 @@ CONDITIONAL_REQUIRED: list[tuple[str, str, str]] = [
     ("P6.E13b", "P6.E13", "No"),
 ]
 
-# Cross-question consistency checks (warnings — shown to client and reviewer,
-# never silently "fixed"). Each: (label, (qid, row, col), right) where right
-# is one (qid, row, col) cell or a list of cells that are summed.
-CONSISTENCY_CHECKS: list[tuple[str, tuple[str, str, str], Any]] = [
-    ("Permanent male employees in P3 1(a) should match Section A 20(a)",
-     ("P3.E1a", "perm_male", "total"), ("A.20a", "employees_perm", "male")),
-    ("Permanent female employees in P3 1(a) should match Section A 20(a)",
-     ("P3.E1a", "perm_female", "total"), ("A.20a", "employees_perm", "female")),
-    ("Other-than-permanent male employees in P3 1(a) should match Section A 20(a)",
-     ("P3.E1a", "other_male", "total"), ("A.20a", "employees_other", "male")),
-    ("Other-than-permanent female employees in P3 1(a) should match Section A 20(a)",
-     ("P3.E1a", "other_female", "total"), ("A.20a", "employees_other", "female")),
-    ("Permanent male workers in P3 1(b) should match Section A 20(a)",
-     ("P3.E1b", "perm_male", "total"), ("A.20a", "workers_perm", "male")),
-    ("Permanent female workers in P3 1(b) should match Section A 20(a)",
-     ("P3.E1b", "perm_female", "total"), ("A.20a", "workers_perm", "female")),
-    ("Total employees trained in P3 8 (current FY) should match total employees in Section A 20(a)",
-     ("P3.E8", "emp_total", "cy_total"), ("A.20a", "employees_total", "total")),
-    ("Total employees in P3 9 (current FY) should match total employees in Section A 20(a)",
-     ("P3.E9", "emp_total", "cy_total"), ("A.20a", "employees_total", "total")),
-    ("Permanent employees in P5 1 (current FY) should match Section A 20(a)",
-     ("P5.E1", "emp_perm", "cy_total"), ("A.20a", "employees_perm", "total")),
-    ("Permanent male employees in P5 2 (current FY) should match Section A 20(a)",
-     ("P5.E2", "emp_perm_male", "cy_total"), ("A.20a", "employees_perm", "male")),
-    ("Permanent female employees in P5 2 (current FY) should match Section A 20(a)",
-     ("P5.E2", "emp_perm_female", "cy_total"), ("A.20a", "employees_perm", "female")),
-    ("Female headcount in P5 7 should match total female employees + workers in Section A 20(a)",
-     ("P5.E7", "female_headcount", "cy_v"),
-     [("A.20a", "employees_total", "female"), ("A.20a", "workers_total", "female")]),
-    ("Sexual harassment complaints in P5 6 should match POSH complaints in P5 7 (current FY)",
-     ("P5.E6", "sexual_harassment", "cy_filed"), ("P5.E7", "total", "cy_v")),
-]
+# Cross-question consistency checks. Retired: every table that repeats a
+# headcount or complaint count is now built from the same annual figure, so
+# they cannot disagree. Kept as an (empty) extension point.
+CONSISTENCY_CHECKS: list[tuple[str, tuple[str, str, str], Any]] = []
 
 
 # ---------------------------------------------------------------------------
@@ -1354,6 +1487,35 @@ def _self_check() -> None:
             for c in q["columns"]:
                 if c["kind"] not in INPUT_KINDS:
                     raise ValueError(f"{qid}.{c['key']}: rows tables take inputs only")
+    for q in QUESTIONS:
+        if not q.get("derive"):
+            continue
+        for cell, expr in q["derive"].items():
+            unknown = F.names_in(expr) - set(METRICS)
+            if unknown:
+                raise ValueError(f"{q['id']} {cell}: unknown metrics {unknown}")
+            if q["type"] == "number":
+                if cell != "value":
+                    raise ValueError(f"{q['id']}: number questions derive only 'value', got {cell}")
+                continue
+            target, base = cell.split(".", 1)
+            if q["type"] == "fields":
+                if target != "fields" or base not in [f["key"] for f in q["fields"]]:
+                    raise ValueError(f"{q['id']}: derive targets unknown field {cell}")
+                continue
+            rows = {r["key"]: r for r in q["rows"]}
+            if target not in rows or rows[target].get("header") or rows[target].get("formula"):
+                raise ValueError(f"{q['id']}: derive targets unknown/non-input row {target}")
+            if not any(c["key"] == base or (c.get("period") and c["key"] == f"{c['period']}_{base}")
+                       for c in q["columns"] if c["kind"] != "computed"):
+                raise ValueError(f"{q['id']}: derive targets unknown column {base}")
+    for code in SECTION_CODES:
+        if not any(q["section"] == code for q in QUESTIONS):
+            raise ValueError(f"Section {code} has no questions")
+    for q in QUESTIONS:
+        for dept in q.get("departments", []):
+            if dept not in DEPARTMENTS:
+                raise ValueError(f"{q['id']}: unknown department {dept!r}")
     for (a, b, _ans) in CONDITIONAL_REQUIRED:
         if a not in QUESTIONS_BY_ID or b not in QUESTIONS_BY_ID:
             raise ValueError(f"Conditional requirement references unknown question {a}/{b}")
@@ -1387,7 +1549,7 @@ def financial_year_labels(fy: str) -> dict[str, str]:
 
 def public_bank() -> dict:
     """The bank as served to the frontend."""
-    return {"sections": SECTIONS, "questions": QUESTIONS, "version": BANK_VERSION}
+    return {"sections": SECTIONS, "questions": QUESTIONS, "version": BANK_VERSION, "departments": DEPARTMENTS}
 
 
-BANK_VERSION = "sebi-2023-122.v1"
+BANK_VERSION = "sebi-2023-122.v2-annual-data"

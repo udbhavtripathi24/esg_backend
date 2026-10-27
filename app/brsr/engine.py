@@ -14,6 +14,7 @@ Answer payload shapes (stored as JSON, one row per question):
     table           {"cells": {row_key: {col_key: value}}}   inputs only
     rows            {"rows": [{col_key: value}, ...], "none": bool}
     principle_grid  {"cells": {row_key: {"P1".."P9": value}}, "span": {row_key: value}}
+    metrics         {"values": {metric: value}, "py": {metric: value}}   annual data
 Every shape may also carry:
     "na": true, "na_reason": str   question not applicable (with reason)
     "note": str                    footnote printed under the answer
@@ -32,6 +33,7 @@ import re
 from typing import Any, Callable, Optional
 
 from app.brsr import formula as F
+from app.brsr.annual_data import METRIC_GROUP_SHOW_IF, METRICS, PLAUSIBILITY
 from app.brsr.question_bank import (
     CONDITIONAL_REQUIRED, CONSISTENCY_CHECKS, PRINCIPLES, QUESTIONS, QUESTIONS_BY_ID, YESNO_OPTIONS,
 )
@@ -111,11 +113,31 @@ def _norm_scalar(qid: str, kind: str, v: Any, *, options: list[str] | None = Non
 
 
 def _common(qid: str, raw: dict, out: dict) -> None:
-    if raw.get("na"):
+    q = QUESTIONS_BY_ID.get(qid) or {}
+    # A question the platform builds from the annual data cannot be "not
+    # applicable" by itself — zero inputs produce zeros. Hybrid tables (with
+    # columns the client still types) keep the option.
+    fully_derived = bool(q.get("derive")) and not q.get("required")
+    if raw.get("na") and not fully_derived:
         out["na"] = True
         out["na_reason"] = str(raw.get("na_reason") or "").strip()
     if not _is_blank(raw.get("note")):
         out["note"] = str(raw["note"]).strip()[:MAX_TEXT]
+
+
+def derive_key(col: dict, rk: str) -> Optional[str]:
+    """``<row>.<base>`` for a table input cell, or None when the column's
+    year cannot be derived (only the current and previous year can)."""
+    period = col.get("period")
+    if period and period not in ("cy", "py"):
+        return None
+    base = col["key"][len(period) + 1:] if period else col["key"]
+    return f"{rk}.{base}"
+
+
+def is_derived_cell(q: dict, rk: str, col: dict) -> bool:
+    key = derive_key(col, rk)
+    return bool(q.get("derive")) and key is not None and key in q["derive"]
 
 
 def normalize_answer(qid: str, raw: Any) -> dict:
@@ -170,8 +192,8 @@ def normalize_answer(qid: str, raw: Any) -> dict:
                 if ck not in cols:
                     raise PayloadError(qid, f"unknown column {ck}")
                 c = cols[ck]
-                # Computed cells are never stored, whatever the client sends.
-                if r.get("header") or c["kind"] == "computed":
+                # Computed and derived cells are never stored, whatever the client sends.
+                if r.get("header") or c["kind"] == "computed" or is_derived_cell(q, rk, c):
                     continue
                 if r.get("formula") and c["kind"] in NUMERIC_KINDS:
                     continue
@@ -201,6 +223,17 @@ def normalize_answer(qid: str, raw: Any) -> dict:
         # allow zero rows, and only while no rows are entered.
         if raw.get("none") and not rows_out and q.get("min_rows", 1) == 0:
             out["none"] = True
+    elif t == "metrics":
+        allowed = {f["key"]: f for g in q["groups"] for f in g["fields"]}
+        for part in ("values", "py"):
+            given = raw.get(part) or {}
+            if not isinstance(given, dict):
+                raise PayloadError(qid, f"{part} must be an object")
+            unknown = set(given) - set(allowed)
+            if unknown:
+                raise PayloadError(qid, f"unknown fields {sorted(unknown)}")
+            vals = {k: _norm_scalar(qid, allowed[k]["kind"], v) for k, v in given.items()}
+            out[part] = {k: v for k, v in vals.items() if v is not None}
     elif t == "principle_grid":
         given = raw.get("cells") or {}
         span = raw.get("span") or {}
@@ -239,13 +272,104 @@ def normalize_answer(qid: str, raw: Any) -> dict:
 # Computation
 # ---------------------------------------------------------------------------
 
+METRIC_QUESTIONS = [q for q in QUESTIONS if q["type"] == "metrics"]
+
+
+def metric_values(answers: dict[str, dict]) -> dict[str, dict[str, Any]]:
+    """Annual data by year: {"cy": {metric: value}, "py": {...}}.
+
+    Fields in a group hidden by its ``show_if`` (e.g. worker questions for an
+    entity with no workers) count as 0, so the tables built from them show
+    0 rather than blank."""
+    out: dict[str, dict[str, Any]] = {"cy": {}, "py": {}}
+    for q in METRIC_QUESTIONS:
+        a = answers.get(q["id"]) or {}
+        out["cy"].update(a.get("values") or {})
+        out["py"].update(a.get("py") or {})
+    for period, vals in out.items():
+        for key, cond in METRIC_GROUP_SHOW_IF.items():
+            if not group_visible(cond, vals):
+                vals[key] = 0
+    return out
+
+
+def hidden_groups(q: dict, answers: dict[str, dict]) -> list[int]:
+    """Indexes of a metrics question's groups not asked of this entity
+    (their ``show_if`` is false on the current-year figures)."""
+    vals = metric_values(answers)["cy"]
+    return [i for i, g in enumerate(q.get("groups") or []) if not group_visible(g.get("show_if"), vals)]
+
+
+def group_visible(cond: Optional[str], vals: dict[str, Any]) -> bool:
+    """A group is hidden only once its condition is known to be false (e.g.
+    the worker headcount has been entered as 0). While the inputs are still
+    blank the group is shown — and nothing is assumed to be zero."""
+    if not cond:
+        return True
+    v = F.evaluate(cond, lambda n: vals.get(n))
+    return v is None or bool(v)
+
+
+def apply_derivations(answers: dict[str, dict]) -> dict[str, dict]:
+    """Returns a copy of ``answers`` with every derived BRSR cell filled in
+    from the annual data. Stored answers are never modified; derived cells
+    are recomputed on every read, so they cannot drift from their source."""
+    mv = metric_values(answers)
+    out = dict(answers)
+
+    def ev(expr: str, period: str) -> Any:
+        vals = mv[period]
+        meta = METRICS.get(expr.strip())
+        if meta and meta["kind"] in ("yesno", "choice"):  # non-numeric metric, copied as is
+            return vals.get(expr.strip())
+        return F.evaluate(expr, lambda n: vals.get(n))
+
+    for q in QUESTIONS:
+        spec = q.get("derive")
+        if not spec:
+            continue
+        stored = answers.get(q["id"]) or {}
+        if q["type"] == "number":
+            out[q["id"]] = {**stored, "value": ev(spec["value"], "cy")}
+            out[q["id"]].pop("na", None)
+            continue
+        if q["type"] == "fields":
+            fields = dict(stored.get("fields") or {})
+            for cell, expr in spec.items():
+                fields[cell.split(".", 1)[1]] = ev(expr, "cy")
+            out[q["id"]] = {**{k: v for k, v in stored.items() if k != "na"}, "fields": fields}
+            continue
+        cells = {rk: dict(rv) for rk, rv in (stored.get("cells") or {}).items()}
+        for r in q["rows"]:
+            if r.get("header") or r.get("formula"):
+                continue
+            for c in q["columns"]:
+                if c["kind"] == "computed":
+                    continue
+                key = derive_key(c, r["key"])
+                if key is None or key not in spec:
+                    continue
+                v = ev(spec[key], c.get("period") or "cy")
+                if v is None:
+                    cells.get(r["key"], {}).pop(c["key"], None)
+                else:
+                    cells.setdefault(r["key"], {})[c["key"]] = v
+        derived = {k: v for k, v in stored.items() if k not in ("na", "na_reason")}
+        derived["cells"] = cells
+        out[q["id"]] = derived
+    return out
+
+
 class Computer:
     """Computes full table grids (inputs + derived cells) for one response
     set. Cross-question references (ref('P6.DEN', 'revenue')) resolve
-    through the same instance, memoised, with cycle protection."""
+    through the same instance, memoised, with cycle protection.
+
+    Annual-data derivations are applied first, so every consumer sees the
+    complete BRSR tables."""
 
     def __init__(self, answers: dict[str, dict]):
-        self.answers = answers
+        self.answers = apply_derivations(answers)
         self._grids: dict[str, dict] = {}
         self._stack: set[tuple[str, str, str]] = set()
 
@@ -366,7 +490,34 @@ def _fmt(n: Any) -> str:
     return str(n)
 
 
-def is_answered(q: dict, ans: Optional[dict]) -> bool:
+def metric_fields_missing(q: dict, ans: Optional[dict], answers: dict[str, dict] | None = None) -> list[str]:
+    """Required, visible annual-data fields left blank (current year)."""
+    vals = (ans or {}).get("values") or {}
+    context = metric_values(answers)["cy"] if answers is not None else vals
+    missing = []
+    for g in q["groups"]:
+        if not group_visible(g.get("show_if"), {**context, **vals}):
+            continue
+        for f in g["fields"]:
+            if f.get("required", True) and _is_blank(vals.get(f["key"])):
+                missing.append(f["key"])
+    return missing
+
+
+def _lte_label(expr: str) -> str:
+    names = F.names_in(expr)
+    if len(names) == 1:
+        return METRICS[next(iter(names))]["label"]
+    if expr.count("-"):
+        return "the headcount not already counted"
+    return "the total headcount" if all(n.startswith(("emp_", "wrk_")) for n in names) else "the total"
+
+
+def is_answered(q: dict, ans: Optional[dict], answers: dict[str, dict] | None = None) -> bool:
+    if q.get("derive") and not q.get("required"):
+        return True  # built from annual data
+    if q["type"] == "metrics":
+        return bool(ans) and not metric_fields_missing(q, ans, answers)
     if not ans:
         return False
     if ans.get("na"):
@@ -412,6 +563,30 @@ def required_ids(answers: dict[str, dict]) -> set[str]:
     return req
 
 
+def _plausibility(qid: str, q: dict, ans: dict, mv: dict) -> list[dict]:
+    """Warnings from PLAUSIBILITY rules whose figures belong to this area."""
+    own = {f["key"] for g in q["groups"] for f in g["fields"]}
+    out = []
+    for rule in PLAUSIBILITY:
+        if not set(rule["fields"]) <= own:
+            continue
+        for period, part in (("cy", "values"), ("py", "py")):
+            vals = mv[period]
+            if not any(not _is_blank((ans.get(part) or {}).get(k)) for k in rule["fields"]):
+                continue
+            if rule.get("unless") and F.evaluate(rule["unless"], lambda n: vals.get(n)):
+                continue
+            total = F.evaluate(" + ".join(rule["fields"]), lambda n: vals.get(n))
+            per = F.evaluate(rule["per"], lambda n: vals.get(n))
+            if total is None or not per:
+                continue
+            if total / per > rule["max"]:
+                year = "" if period == "cy" else " (previous year)"
+                out.append(_issue("warning", qid, rule["message"].format(value=_fmt(round(total / per))) + year,
+                                  f"{part}.{rule['fields'][0]}"))
+    return out
+
+
 def validate_answer(qid: str, ans: Optional[dict], answers: dict[str, dict],
                     computer: Optional[Computer] = None) -> list[dict]:
     """Errors and warnings for one stored answer (no completeness)."""
@@ -448,6 +623,30 @@ def validate_answer(qid: str, ans: Optional[dict], answers: dict[str, dict],
             issues += _check_scalar(qid, fd["kind"], f.get(fd["key"]), fd["label"], f"fields.{fd['key']}",
                                     options=fd.get("options"), pattern=fd.get("pattern"),
                                     pattern_hint=fd.get("pattern_hint"), minv=fd.get("min"), maxv=fd.get("max"))
+    elif t == "metrics":
+        mv = metric_values(answers)
+        for period, part in (("cy", "values"), ("py", "py")):
+            vals = ans.get(part) or {}
+            ctx = mv[period]
+            year = "" if period == "cy" else " (previous year)"
+            for g in q["groups"]:
+                if not group_visible(g.get("show_if"), ctx):
+                    continue
+                for f in g["fields"]:
+                    v = vals.get(f["key"])
+                    issues += _check_scalar(qid, f["kind"], v, f"{f['label']}{year}", f"{part}.{f['key']}",
+                                            options=f.get("options"))
+                    if f.get("lte") and not _is_blank(v):
+                        try:
+                            a = _to_number(v)
+                        except ValueError:
+                            continue
+                        b = F.evaluate(f["lte"], lambda n: ctx.get(n))
+                        if a is not None and b is not None and a > b + 1e-9:
+                            issues.append(_issue(
+                                "error", qid, f"{f['label']}{year} ({_fmt(a)}) cannot exceed "
+                                              f"{_lte_label(f['lte'])} ({_fmt(b)})", f"{part}.{f['key']}"))
+        issues += _plausibility(qid, q, ans, mv)
     elif t == "table":
         comp = computer or Computer(answers)
         cells = ans.get("cells") or {}
@@ -459,7 +658,9 @@ def validate_answer(qid: str, ans: Optional[dict], answers: dict[str, dict],
                 issues += _check_scalar(qid, c["kind"], v, f"{rows[rk]['label']} / {c['label'] or ck}",
                                         f"cells.{rk}.{ck}", options=c.get("options"))
         # Constraints are checked on computed grids so totals rows are covered too.
-        grid = comp.grid(qid)
+        # Tables built from annual data are validated there, at the source,
+        # so an HR data error never blocks another department's section.
+        grid = {} if q.get("derive") else comp.grid(qid)
         for rk, rv in grid.items():
             for c in q["columns"]:
                 if "lte" in c:
@@ -470,7 +671,7 @@ def validate_answer(qid: str, ans: Optional[dict], answers: dict[str, dict],
                             "error", qid,
                             f"{rows[rk]['label']}: {c['label']} ({_fmt(a)}) cannot exceed "
                             f"{other['label']} ({_fmt(b)})", f"cells.{rk}.{c['key']}"))
-        if qid in ("A.20a", "A.20b"):
+        if qid in ("A.20a", "A.20b") and not q.get("derive"):
             for rk, rv in grid.items():
                 t_, m, fe = rv.get("total"), rv.get("male"), rv.get("female")
                 if all(isinstance(x, (int, float)) for x in (t_, m, fe)) and m + fe != t_:
@@ -549,10 +750,19 @@ def section_report(section: str, answers: dict[str, dict]) -> dict:
     req = required_ids(answers)
     questions = [q for q in QUESTIONS if q["section"] == section]
     missing, issues = [], []
+    missing_fields: dict[str, list[str]] = {}
     answered = 0
+    field_total = field_missing = 0
     for q in questions:
         a = answers.get(q["id"])
-        ok = is_answered(q, a)
+        ok = is_answered(q, a, answers)
+        if q["type"] == "metrics":
+            gaps = metric_fields_missing(q, a, answers)
+            missing_fields[q["id"]] = gaps
+            ctx = {**metric_values(answers)["cy"], **((a or {}).get("values") or {})}
+            field_total += sum(1 for g in q["groups"] if group_visible(g.get("show_if"), ctx)
+                               for f in g["fields"] if f.get("required", True))
+            field_missing += len(gaps)
         if ok:
             answered += 1
         elif q["id"] in req:
@@ -560,9 +770,13 @@ def section_report(section: str, answers: dict[str, dict]) -> dict:
         issues += validate_answer(q["id"], a, answers, comp)
     section_ids = {q["id"] for q in questions}
     issues += [w for w in consistency_warnings(answers, comp) if w["question_id"] in section_ids]
-    required_total = len([q for q in questions if q["id"] in req])
-    required_answered = required_total - len(missing)
+    if field_total:  # annual-data sections: progress is counted in fields, not questions
+        required_total, required_answered = field_total, field_total - field_missing
+    else:
+        required_total = len([q for q in questions if q["id"] in req])
+        required_answered = required_total - len(missing)
     return {
+        "missing_fields": missing_fields,
         "section": section,
         "questions": len(questions),
         "answered": answered,
@@ -576,18 +790,23 @@ def section_report(section: str, answers: dict[str, dict]) -> dict:
 
 
 def computed_view(qid: str, answers: dict[str, dict], computer: Optional[Computer] = None) -> Optional[dict]:
-    """Derived cells for display alongside the stored inputs (tables only)."""
+    """Cells the platform fills — calculated cells, and cells built from the
+    annual data — for display alongside the stored inputs. For a derived
+    number or fields question, the derived answer itself."""
     q = QUESTIONS_BY_ID[qid]
+    comp = computer or Computer(answers)
+    if q.get("derive") and q["type"] in ("number", "fields"):
+        return {"derived_answer": comp.answers.get(qid)}
     if q["type"] != "table":
         return None
-    comp = computer or Computer(answers)
     grid = comp.grid(qid)
     rows = {r["key"]: r for r in q["rows"]}
     cols = {c["key"]: c for c in q["columns"]}
     out: dict[str, dict] = {}
     for rk, rv in grid.items():
         for ck, v in rv.items():
-            if cols[ck]["kind"] == "computed" or (rows[rk].get("formula") and cols[ck]["kind"] in NUMERIC_KINDS):
+            if cols[ck]["kind"] == "computed" or (rows[rk].get("formula") and cols[ck]["kind"] in NUMERIC_KINDS) \
+                    or is_derived_cell(q, rk, cols[ck]):
                 out.setdefault(rk, {})[ck] = v
     return out
 

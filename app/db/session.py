@@ -20,13 +20,49 @@ engine = create_engine(
 )
 
 
+def alembic_heads() -> list[str]:
+    """The migration head(s) this code expects."""
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parents[2]
+    return sorted(ScriptDirectory.from_config(Config(str(root / "alembic.ini"))).get_heads())
+
+
+def migration_state(conn=None) -> dict:
+    """Compare the database's Alembic revision with the code's head.
+
+    Returns {"current": [...], "head": [...], "up_to_date": bool}. Raises if
+    the database is unreachable."""
+    from alembic.runtime.migration import MigrationContext
+
+    heads = alembic_heads()
+    if conn is None:
+        with engine.connect() as c:
+            current = sorted(MigrationContext.configure(c).get_current_heads())
+    else:
+        current = sorted(MigrationContext.configure(conn).get_current_heads())
+    return {"current": current, "head": heads, "up_to_date": current == heads}
+
+
 def init_db() -> None:
-    """Create tables from metadata. Failure-tolerant: on startup we log and
-    continue so the container can boot even if the DB isn't up yet; /ready is
-    the authoritative DB health gate (Cloud Run pattern)."""
+    """Startup schema check. Failure-tolerant: the container boots even if the
+    DB isn't up yet; /ready is the authoritative health gate (Cloud Run).
+
+    Schema changes go through `alembic upgrade head` only. DB_AUTO_CREATE
+    (local sandbox) is ignored in production."""
     import app.models  # noqa: F401
     try:
-        SQLModel.metadata.create_all(engine)
+        if settings.DB_AUTO_CREATE and not settings.is_production:
+            log.warning("db_auto_create", note="creating tables from models; use Alembic for real databases")
+            SQLModel.metadata.create_all(engine)
+            return
+        state = migration_state()
+        if not state["up_to_date"]:
+            log.warning("db_migrations_pending", current=state["current"], head=state["head"],
+                        fix="run: alembic upgrade head")
     except Exception as exc:  # noqa: BLE001
         log.warning("init_db_skipped", reason=str(exc))
 

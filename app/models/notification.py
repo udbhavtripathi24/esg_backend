@@ -45,7 +45,7 @@ class NotificationOutbox(SQLModel, table=True):
     # Full context needed to render notifications for all recipients:
     #   { "recipient_user_ids": [...], "entity_type": ..., "entity_id": ...,
     #     "entity_public_id": ..., "title": ..., "body": ... }
-    payload: dict[str, Any] = Field(sa_column=Column(JSON))
+    payload: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
     status: str = Field(default="pending")
     attempts: int = Field(default=0)
     last_error: Optional[str] = None

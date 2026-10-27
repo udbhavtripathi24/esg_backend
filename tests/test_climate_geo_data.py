@@ -169,3 +169,31 @@ def test_asset_type_filter(client, session):
 def test_geo_endpoints_require_authentication(client):
     assert client.get("/api/v1/demo-esg-dashboard/climate/district/filters").status_code == 401
     assert client.get("/api/v1/demo-esg-dashboard/climate/asset/scores").status_code == 401
+
+
+def test_district_list_has_no_placeholder_or_duplicate_names():
+    """Every scored district must be one the map can actually colour.
+
+    The boundary source carries a nameless whole-state outline per state,
+    which the extractor records as "Unknown". Scoring those produced rows
+    with no polygon -- including an "Unknown" entry that could surface in
+    the highest/lowest-risk lists -- and inflated the district count from
+    724 to 760.
+    """
+    from app.services.climate_geo_data import STATE_DISTRICTS
+
+    flat = [(state, d) for state, ds in STATE_DISTRICTS.items() for d in ds]
+    placeholders = [p for p in flat if p[1].strip().lower() in {"unknown", "unnamed"}]
+    assert placeholders == [], f"placeholder districts leaked through: {placeholders}"
+    assert len(flat) == len(set(flat)), "duplicate (state, district) pairs"
+    assert len(flat) == 724, f"expected 724 districts, got {len(flat)}"
+    assert len(STATE_DISTRICTS) == 36
+
+
+def test_district_scores_exclude_placeholders(client, session):
+    user = _user(session)
+    b = client.get("/api/v1/demo-esg-dashboard/climate/district/scores",
+                   headers=auth(user)).json()
+    names = {d["district"] for d in b["scores"]}
+    assert "Unknown" not in names
+    assert b["district_count"] == 724

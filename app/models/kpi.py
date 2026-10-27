@@ -154,7 +154,7 @@ class KpiValue(SQLModel, table=True):
     kpi_definition_version: int = Field(default=1)
     value: float
     unit: str  # exactly as reported in the source file — never converted
-    attributes: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    attributes: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
 
     # Denormalized reporting period (from the dataset) — enables direct
     # period-range queries without joining back through datasets. Matches
