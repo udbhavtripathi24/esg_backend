@@ -111,6 +111,15 @@ def extract_kpi_values_for_version(session: Session, dataset_version_id: int, jo
     if not upload_type:
         raise ExtractionError(f"UploadType {dataset.upload_type_id} not found")
 
+    # Data sheets (the 27 BRSR templates, upload types "sheet_<code>") have
+    # their own fixed columns and per-row periods; delegated, same writer.
+    from app.datasheets.service import sheet_of_upload_type
+    sheet = sheet_of_upload_type(upload_type.code)
+    if sheet:
+        from app.datasheets.extract import extract_sheet_version
+        return extract_sheet_version(session, sheet=sheet, version=version, dataset=dataset,
+                                     upload_type=upload_type, job_id=job_id, write=_write_kpi_values)
+
     domain_map = _DOMAIN_COLUMN_MAP.get(upload_type.code)
     if not domain_map:
         # Genuinely unsupported domain (e.g. general_evidence, which is

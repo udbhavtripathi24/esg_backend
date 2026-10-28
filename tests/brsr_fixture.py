@@ -15,6 +15,8 @@ divided by permanent male employees (2,551) instead of all male employees
 intensity (Total energy / intensity) and is illustrative only.
 """
 
+from app.brsr.question_bank import QUESTIONS_BY_ID
+
 NA = lambda reason: {"na": True, "na_reason": reason}  # noqa: E731
 
 
@@ -38,7 +40,7 @@ def answers() -> dict:
                              "Bandra East, Mumbai – 400 051",
         "email": "esg@nuvama.com", "telephone": "022-6620-3030", "website": "www.nuvama.com",
         "stock_exchanges": "National Stock Exchange of India Limited and BSE Limited",
-        "paid_up_capital": 359743580, "contact_name": "Rashmi Nagori", "contact_designation": "Head ESG & CSR",
+        "paid_up_capital": 359743580, "contact_name": "Head, ESG & CSR", "contact_designation": "Head ESG & CSR",
         "contact_phone": "022-6620-3030", "contact_email": "esg@nuvama.com",
         "reporting_boundary": "Consolidated", "assurance_provider": "", "assurance_type": "Not obtained",
     }}
@@ -274,94 +276,173 @@ def answers() -> dict:
     a["P6.L5"] = {"text": "Board-approved Business Continuity Plan and Disaster Recovery Plan with regular testing."}
     a["P9.L1"] = {"text": "Company website."}
 
-    # ---- Quantitative tables now come from the annual data (bank v2) ------
-    from app.brsr.annual_data import DERIVE, DERIVED_STILL_REQUIRED
-    for qid in DERIVE:
-        if qid not in DERIVED_STILL_REQUIRED:
-            a.pop(qid, None)
-    # Hybrid tables: only the columns the client still types
+    # ---- Bank v3: figures come from the data sheets ------------------------
+    # Questions built entirely from the sheets are not typed at all; in mixed
+    # tables only the typed cells are kept (the engine drops the rest).
+    for qid in list(a):
+        if QUESTIONS_BY_ID[qid].get("source") == "data":
+            a.pop(qid)
     a["A.25"] = {"cells": {k: {"mechanism": "Yes"} for k in ("communities", "investors", "shareholders",
                                                                  "employees", "customers", "value_chain")}
                  | {"other": {"mechanism": "NA"}}}
     a["P3.E2"] = {"cells": {k: {"cy_deposited": "Yes", "py_deposited": "Yes"} for k in ("pf", "gratuity", "esi",
                                                                                          "others")}}
-    a.update(annual_data())
+    a["P5.E7"] = {"cells": {"upheld": _cypy(1, 2)}}
+    a["P6.E6"] = {"cells": {k: {"unit": u} for k, u in (("nox", "ppm"), ("sox", "ppm"), ("pm", "mg/m3"),
+                                                        ("pop", "mg/m3"), ("voc", "mg/m3"), ("hap", "mg/m3"))}}
     return a
 
 
-def annual_data() -> dict:
-    """The reference filing's quantitative disclosures as annual figures.
-    Where the filing gives only a rate, the inputs are chosen to reproduce it
-    (e.g. turnover rate 23.38% from start/end headcount and leavers)."""
-    zero = lambda *keys: {k: 0 for k in keys}  # noqa: E731
-    return {
-        "D.WF": {"values": {
-            "emp_perm_m": 2551, "emp_perm_f": 863, "emp_oth_m": 406, "emp_oth_f": 83,
-            **zero("wrk_perm_m", "wrk_perm_f", "wrk_oth_m", "wrk_oth_f"),
-            "da_emp_perm_m": 3, **zero("da_emp_perm_f", "da_emp_oth_m", "da_emp_oth_f"),
-            "emp_perm_m_start": 2500, "emp_perm_f_start": 840, "left_emp_perm_m": 590, "left_emp_perm_f": 225,
-        }, "py": {"emp_perm_m": 2500, "emp_perm_f": 840, "emp_oth_m": 380, "emp_oth_f": 80,
-                  **zero("wrk_perm_m", "wrk_perm_f", "wrk_oth_m", "wrk_oth_f")}},
-        "D.BD": {"values": {"bod_m": 8, "bod_f": 1, "kmp_m": 3, "kmp_f": 1}},
-        "D.WB": {"values": {
-            "wb_health_emp_perm_m": 2551, "wb_health_emp_perm_f": 863, "wb_accident_emp_perm_m": 2551,
-            "wb_accident_emp_perm_f": 863, "wb_maternity_emp_perm_f": 29, "wb_paternity_emp_perm_m": 114,
-            "wb_daycare_emp_perm_m": 0, "wb_daycare_emp_perm_f": 0,
-            "wb_health_emp_oth_m": 311, "wb_health_emp_oth_f": 52, "wb_accident_emp_oth_m": 311,
-            "wb_accident_emp_oth_f": 52, "wb_maternity_emp_oth_f": 1, "wb_paternity_emp_oth_m": 0,
-            "wb_daycare_emp_oth_m": 0, "wb_daycare_emp_oth_f": 0,
-            "wb_cost": 225913000, "ret_pf_emp": 3786, "ret_gratuity_emp": 3903, "ret_esi_emp": 39,
-            "ret_other_emp": 117,
-            "pl_emp_took_m": 114, "pl_emp_returned_m": 114, "pl_emp_retained_m": 108,
-            "pl_emp_took_f": 29, "pl_emp_returned_f": 27, "pl_emp_retained_f": 24,
-            "union_emp_perm_m": 0, "union_emp_perm_f": 0,
-        }},
-        "D.TR": {"values": {"tr_hs_emp_m": 1940, "tr_hs_emp_f": 646, "tr_skill_emp_m": 2500, "tr_skill_emp_f": 792,
-                            "tr_hr_emp_perm": 2586, "tr_hr_emp_oth": 385,
-                            # Correct denominators: the filing divided 2,862 by 2,551 and printed 112.19%.
-                            "rev_emp_m": 2862, "rev_emp_f": 915}},
-        "D.WG": {"values": {
-            **zero("mw_eq_emp_perm_m", "mw_eq_emp_perm_f", "mw_eq_emp_oth_m", "mw_eq_emp_oth_f"),
-            "mw_more_emp_perm_m": 2535, "mw_more_emp_perm_f": 857, "mw_more_emp_oth_m": 311, "mw_more_emp_oth_f": 52,
-            "med_bod_m": 3470000, "med_bod_f": 3190000, "med_kmp_m": 70014457.5, "med_kmp_f": 7823340,
-            "med_emp_n_m": 211, "med_emp_m": 2615177.5, "med_emp_n_f": 67, "med_emp_f": 1328150.5,
-            "wages_total": 10000000000, "wages_female": 1502063118,
-            "wages_rural": 0, "wages_semi_urban": 0, "wages_urban": 919120261, "wages_metro": 9080879739,
-        }},
-        "D.HS": {"values": {"lti_emp": 0, "hours_emp": 7806000, "recordable_emp": 0, "fatal_emp": 0,
-                            "highcons_emp": 0}, "py": {"hours_emp": 7500000}},
-        "D.HC": {"values": {**zero("cmp_wc_filed", "cmp_wc_pending", "cmp_hs_filed", "cmp_hs_pending",
-                                   "cmp_disc_filed", "cmp_disc_pending", "cmp_child_filed", "cmp_child_pending",
-                                   "cmp_forced_filed", "cmp_forced_pending", "cmp_wages_filed",
-                                   "cmp_wages_pending", "cmp_otherhr_filed", "cmp_otherhr_pending"),
-                            "cmp_sh_filed": 1, "cmp_sh_pending": 1, "cmp_sh_upheld": 1},
-                 "py": {"cmp_sh_filed": 2, "cmp_sh_pending": 0, "cmp_sh_upheld": 2}},
-        "D.GR": {"values": {**zero(*[f"ngrbc_{k}_{c}" for k in ("comm", "inv", "sh", "emp", "cust", "vc", "other")
-                                     for c in ("filed", "pending")]),
-                            **zero(*[f"cc_{k}_{c}" for k in ("privacy", "adv", "cyber", "ess", "rtp", "utp", "other")
-                                     for c in ("rec", "pending")]),
-                            **zero("coi_directors", "coi_kmps", "disc_directors", "disc_kmps", "disc_employees",
-                                   "disc_workers", "breaches", "pii_breaches")},
-                 "py": {"cc_other_rec": 1155, "cc_other_pending": 14}},
-        "D.EN": {"values": {"elec_ren_kwh": 4192242.84, "elec_nonren_kwh": 5795394.76, "fuel_ren_gj": 0,
-                            "fuel_nonren_gj": 0, "energy_other_ren_gj": 0, "energy_other_nonren_gj": 0,
-                            "scope1": 0, "scope2": 1170.35},
-                 "py": {"elec_ren_kwh": 2695950, "elec_nonren_kwh": 7667530, "scope1": 0, "scope2": 1548.42}},
-        "D.WA": {"values": {"w_surface": 0, "w_ground": 0, "w_third_party": 0, "w_sea": 0, "w_other": 20222.02,
-                            "w_consumption": 20222.02,
-                            **zero(*[f"wd_{d}_{t}" for d in ("surface", "ground", "sea", "third", "other")
-                                     for t in ("none", "treated")])},
-                 "py": {"w_other": 44188, "w_consumption": 44188}},
-        "D.WS": {"values": {"ws_plastic": 0, "ws_ewaste": 0.722, "ws_biomedical": 0, "ws_cnd": 0, "ws_battery": 0,
-                            "ws_radioactive": 0, "ws_other_haz": 0, "ws_other_nonhaz": 217.729,
-                            "ws_recycled": 0.722, "ws_reused": 0, "ws_other_recovery": 0,
-                            "ws_incineration": 0, "ws_landfill": 0, "ws_other_disposal": 0},
-                 "py": {"ws_ewaste": 0.34, "ws_other_nonhaz": 298}},
-        "D.FN": {"values": {"revenue": 41693400000, "turnover": 41693400000, "net_worth": 35000000000,
-                            "exports": 0, "csr_applicable": "Yes", "ppp_factor": 20.66,
-                            "payables": 1200000000, "cogs": 9500000000, "inputs_total": 1000000000,
-                            "inputs_msme": 462252685, "inputs_india": 999176902},
-                 "py": {"revenue": 38000000000, "ppp_factor": 20.3}},
-        "D.OP": {"values": {"plants_national": 0, "offices_national": 95, "plants_international": 0,
-                            "offices_international": 6, "states_served": 28, "countries_served": 6}},
-    }
+# ---------------------------------------------------------------------------
+# The same filing's figures as data-sheet metrics (bank v3)
+# ---------------------------------------------------------------------------
+
+def sheet_metrics() -> dict:
+    """{"cy": {metric: value}, "py": {...}} in the keys of
+    app/brsr/sheet_sources.SOURCES. Where the filing gives only a rate, the
+    inputs reproduce it (turnover 23.38%: start 2,500, hires 641, end 2,551)."""
+    from app.brsr.sheet_sources import SOURCES
+    cy = {k: 0 for k in SOURCES}
+    cy.update({
+        "emp_perm_m": 2551, "emp_perm_f": 863, "emp_oth_m": 406, "emp_oth_f": 83,
+        "da_emp_perm_m": 3,
+        "emp_perm_m_start": 2500, "emp_perm_f_start": 840, "emp_perm_m_end": 2551, "emp_perm_f_end": 863,
+        "hires_emp_perm_m": 641, "hires_emp_perm_f": 248,
+        "bod_m": 8, "bod_f": 1, "kmp_m": 3, "kmp_f": 1,
+        "wb_health_emp_perm_m": 2551, "wb_health_emp_perm_f": 863, "wb_accident_emp_perm_m": 2551,
+        "wb_accident_emp_perm_f": 863, "wb_maternity_emp_perm_f": 29, "wb_paternity_emp_perm_m": 114,
+        "wb_health_emp_oth_m": 311, "wb_health_emp_oth_f": 52, "wb_accident_emp_oth_m": 311,
+        "wb_accident_emp_oth_f": 52, "wb_maternity_emp_oth_f": 1,
+        "wb_cost": 225913000, "ret_pf_emp": 3786, "ret_gratuity_emp": 3903, "ret_esi_emp": 39, "ret_other_emp": 117,
+        "pl_emp_took_m": 114, "pl_emp_returned_m": 114, "pl_emp_retained_m": 108,
+        "pl_emp_took_f": 29, "pl_emp_returned_f": 27, "pl_emp_retained_f": 24,
+        "tr_hs_emp_m": 1940, "tr_hs_emp_f": 646, "tr_skill_emp_m": 2500, "tr_skill_emp_f": 792,
+        "tr_hr_emp_perm": 2586, "tr_hr_emp_oth": 385,
+        # Correct denominators: the filing divided 2,862 by 2,551 and printed 112.19%.
+        "rev_emp_m": 2862, "rev_emp_f": 915,
+        "mw_more_emp_perm_m": 2535, "mw_more_emp_perm_f": 857, "mw_more_emp_oth_m": 311, "mw_more_emp_oth_f": 52,
+        "med_bod_m": 3470000, "med_bod_f": 3190000, "med_kmp_m": 70014457.5, "med_kmp_f": 7823340,
+        "med_emp_n_m": 211, "med_emp_m": 2615177.5, "med_emp_n_f": 67, "med_emp_f": 1328150.5,
+        "wages_total": 10000000000, "wages_female": 1502063118, "wages_urban": 919120261, "wages_metro": 9080879739,
+        "hours_emp": 7806000, "cmp_sh_filed": 1, "cmp_sh_pending": 1,
+        "elec_ren_kwh": 4192242.84, "elec_nonren_kwh": 5795394.76,
+        "w_other": 20222.02,
+        "ws_ewaste": 0.722, "ws_other_nonhaz": 217.729, "ws_recycled": 0.722,
+        "revenue": 41693400000, "ppp_factor": 20.66, "payables": 1200000000, "cogs": 9500000000,
+        "inputs_msme": 462252685, "inputs_india": 999176902, "inputs_total": 1000000000,
+        "plants_national": 0, "offices_national": 95, "offices_international": 6, "countries_served": 6,
+        "own_assessed_hs": 91, "own_assessed_wc": 91, "suppliers": 40, "vc_awareness_programmes": 2,
+        "vc_awareness_covered": 20,
+    })
+    py = {k: 0 for k in SOURCES}
+    py.update({"emp_perm_m": 2500, "emp_perm_f": 840, "emp_oth_m": 380, "emp_oth_f": 80,
+               "emp_perm_m_start": 2400, "emp_perm_f_start": 800, "emp_perm_m_end": 2500, "emp_perm_f_end": 840,
+               "hours_emp": 7500000, "cmp_sh_filed": 2, "cc_other_rec": 1155, "cc_other_pending": 14,
+               "elec_ren_kwh": 2695950, "elec_nonren_kwh": 7667530, "w_other": 44188,
+               "ws_ewaste": 0.34, "ws_other_nonhaz": 298, "revenue": 38000000000, "ppp_factor": 20.3,
+               "offices_national": 90, "offices_international": 6, "countries_served": 6})
+    return {"cy": cy, "py": py}
+
+
+def _inverse_rows(metrics: dict, start, end) -> dict:
+    """One row per sheet whose aggregation gives back ``metrics`` (each value
+    goes into the first column of its source, divided by its scale)."""
+    from app.brsr.sheet_sources import SOURCES
+    rows: dict[str, dict] = {}
+
+    def put(sheet: str, cat, col: str, value: float):
+        key = (sheet, cat)
+        r = rows.setdefault(key, {"sheet": sheet, "start": start, "end": end, "location": "Mumbai",
+                                  "attrs": {"location": "Mumbai", **({"Category": cat} if cat else {})},
+                                  "values": {}, "version_id": 1, "row": 2 + len(rows)})
+        r["values"][col] = r["values"].get(col, 0) + value
+
+    shared = {"inputs_total", "inputs_india"}  # share the within-India columns
+    for key, src in SOURCES.items():
+        v = metrics.get(key) or 0
+        if key in shared:
+            continue
+        p = src.parts[0]
+        col = p.cols[0]
+        name, factor = (col, 1.0) if isinstance(col, str) else col
+        val = v / p.scale / factor if v else 0
+        put(p.sheet, p.cat, name, val)
+        for other in src.parts[1:]:  # make sure every sheet a metric reads exists
+            c = other.cols[0]
+            put(other.sheet, other.cat, c if isinstance(c, str) else c[0], 0)
+    put("supply_chain_admin", None, "Input_Material_Sourced_Within_India_INR", metrics.get("inputs_india") or 0)
+    put("supply_chain_admin", None, "Input_Material_Sourced_Outside_India_INR",
+        (metrics.get("inputs_total") or 0) - (metrics.get("inputs_india") or 0))
+    out: dict[str, list] = {}
+    for (sheet, _cat), r in rows.items():
+        out.setdefault(sheet, []).append(r)
+    return out
+
+
+def sheet_rows(fy: str = "2024-25") -> dict:
+    """{sheet: [row]} for the current and previous financial year."""
+    from datetime import date
+    y = int(fy[:4])
+    m = sheet_metrics()
+    cy = _inverse_rows(m["cy"], date(y + 1, 3, 1), date(y + 1, 3, 31))
+    py = _inverse_rows(m["py"], date(y, 3, 1), date(y, 3, 31))
+    for sheet, rs in py.items():
+        cy.setdefault(sheet, []).extend(rs)
+    for rs in cy.values():  # one file per sheet: row numbers must be unique in it
+        for i, r in enumerate(rs, start=2):
+            r["row"] = i
+    return cy
+
+
+def seed_sheet_data(session, company, user, fy: str = "2024-25") -> list:
+    """Approved data-sheet datasets for ``company`` with the fixture figures,
+    as if uploaded, reviewed and extracted. Returns the dataset ids."""
+    from datetime import date
+    from sqlmodel import select
+    from app.datasheets.seed import ensure_datasheet_types
+    from app.datasheets.service import upload_type_code
+    from app.models.dataset import Dataset, DatasetFile, DatasetVersion
+    from app.models.kpi import KpiValue
+    from app.models.upload_type import UploadType
+    ensure_datasheet_types(session)
+    types = {t.code: t for t in session.exec(select(UploadType)).all()}
+    ids = []
+    for sheet, rows in sheet_rows(fy).items():
+        ds = Dataset(company_id=company.id, upload_type_id=types[upload_type_code(sheet)].id,
+                     reporting_period_start=date(int(fy[:4]) - 1, 4, 1), reporting_period_end=date(int(fy[:4]) + 1, 3, 31),
+                     reporting_frequency="monthly", status="approved", created_by=user.id)
+        session.add(ds)
+        session.flush()
+        v = DatasetVersion(dataset_id=ds.id, version_number=1, status="approved", uploaded_by=user.id)
+        session.add(v)
+        session.flush()
+        f = DatasetFile(dataset_version_id=v.id, role="data", storage_key=f"test/{sheet}.xlsx",
+                        original_filename=f"{sheet}.xlsx", mime_type="application/octet-stream", size_bytes=1,
+                        sha256_checksum="0" * 64, uploaded_by=user.id)
+        session.add(f)
+        session.flush()
+        ds.current_version_id = v.id
+        for r in rows:
+            for col, val in r["values"].items():
+                session.add(KpiValue(dataset_id=ds.id, dataset_version_id=v.id, source_file_id=f.id,
+                                     source_row_number=r["row"], company_id=company.id,
+                                     kpi_code=f"{sheet}.{col}", value=val, unit="", attributes=r["attrs"],
+                                     reporting_period_start=r["start"], reporting_period_end=r["end"]))
+        ids.append(ds.id)
+    session.commit()
+    return ids
+
+
+def with_sheet_metrics(answers: dict, fy: str = "2024-25") -> dict:
+    """``answers`` plus the sheet metrics the service would inject, computed
+    by the real aggregation from the fixture rows."""
+    from app.brsr.sheet_metrics import SHEET_KEY, coverage_for, fy_bounds, metrics_for, tables_for
+    rows = sheet_rows(fy)
+    s, e = fy_bounds(fy)
+    cy = {k: [r for r in v if r["start"] >= s] for k, v in rows.items()}
+    py = {k: [r for r in v if r["end"] < s] for k, v in rows.items()}
+    out = dict(answers)
+    out[SHEET_KEY] = {"fy": fy, "cy": metrics_for(cy), "py": metrics_for(py), "cy_tables": tables_for(cy),
+                      "py_tables": tables_for(py), "cy_coverage": coverage_for(cy, s, e),
+                      "py_coverage": coverage_for(py, s, e), "basis": [], "warnings": []}
+    return out

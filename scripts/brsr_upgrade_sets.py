@@ -1,8 +1,9 @@
-"""Upgrade BRSR response sets from the v1 question bank to the current one.
+"""Upgrade BRSR response sets started on an earlier question bank to v3.
 
-v1 sets hold their quantitative figures in BRSR table cells; the current bank
-builds those tables from the short Annual data form. This fills each set's
-blank annual figures from its v1 tables (see app/brsr/upgrade.py).
+v3 builds the quantitative tables from the approved data sheets. A v2 set's
+annual-form figures are carried into the cells v3 leaves typed (turnover,
+Scope 1/2, …) and into the previous-year columns; v1 sets need no data moved
+(see app/brsr/upgrade.py).
 
 Safe to run more than once: it only fills blanks and skips sets already on
 the current bank.

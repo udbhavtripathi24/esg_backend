@@ -18,4 +18,12 @@ from app.models.kpi import KpiDefinition, KpiValue  # noqa: F401
 # Report Generation
 from app.models.report import Report, ReportVersion, ReportSnapshot, ReportArtifact, ReportTemplate  # noqa: F401
 # BRSR questionnaire
-from app.models.brsr import BrsrResponseSet, BrsrSection, BrsrAnswer, BrsrAnswerHistory, BrsrComment  # noqa: F401
+from app.models.brsr import (BrsrResponseSet, BrsrSection, BrsrAnswer, BrsrAnswerHistory, BrsrComment,  # noqa: F401
+                             BrsrDepartmentRole, BrsrQuestionStatus)
+# Assurance
+from app.models.assurance import (  # noqa: F401
+    AssuranceEngagement, AssuranceMember, AssuranceItem, AssuranceRequest, AssuranceFinding,
+)
+from app.models.evidence import EvidenceFile  # noqa: F401
+# Surveys & assessments
+from app.models.survey import Survey, SurveyInvite, SurveyResponse, SurveyFile  # noqa: F401

@@ -230,7 +230,8 @@ class _Renderer:
         else:
             _para(self.doc, f"{number}. {prompt}" if number else prompt, bold=True, size=9.5, space_after=3)
 
-        ans = self.answers.get(q["id"])
+        # Derived view: sheet-built cells and lists (e.g. CSR projects) included
+        ans = self.comp.answers.get(q["id"])
         if q["id"] in self.conditional and q["id"] not in self.required and not engine.is_answered(q, ans):
             _para(self.doc, "Not applicable.", size=9.5)
             return
@@ -513,9 +514,88 @@ def build_brsr_docx(snapshot: dict, *, draft: bool = False, generated_at: Option
                 gp.paragraph_format.space_before = Pt(6)
             r.question(q)
 
+    from app.brsr.sheet_metrics import SHEET_KEY
+    if (answers.get(SHEET_KEY) or {}).get("basis"):
+        _data_annex(doc, answers[SHEET_KEY], labels)
+    if snapshot.get("assurance"):
+        _assurance_annex(doc, snapshot["assurance"], labels)
+
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+def _data_annex(doc, sheet: dict, labels: dict) -> None:
+    """Which approved data-sheet uploads the quantitative tables were built from."""
+    from app.datasheets.catalog import SHEETS
+    doc.add_page_break()
+    h = doc.add_heading("ANNEXURE: DATA SOURCES", level=1)
+    for run in h.runs:
+        run.font.name = FONT
+    _para(doc, "The quantitative disclosures are calculated from the following data sheets, as approved in "
+               "Deloitte VISTA. Each figure can be traced to the uploaded row it came from.", size=9.5)
+    cols = ["Data sheet", "Upload", "Version", f"Months ({labels['cy']})", f"Months ({labels['py']})"]
+    t = doc.add_table(rows=1, cols=len(cols))
+    t.style = "Table Grid"
+    for i, c in enumerate(cols):
+        _cell_text(t.rows[0].cells[i], c, bold=True)
+        _shade(t.rows[0].cells[i], "E8F3E3")
+    _repeat_header(t.rows[0])
+    cy, py = sheet.get("cy_coverage") or {}, sheet.get("py_coverage") or {}
+    for b in sorted(sheet.get("basis") or [], key=lambda x: SHEETS.get(x["sheet"], {}).get("title", x["sheet"])):
+        cells = t.add_row().cells
+        values = [SHEETS.get(b["sheet"], {}).get("title", b["sheet"]), b.get("dataset_public_id") or "",
+                  f"v{b.get('version_number')}", str((cy.get(b["sheet"]) or {}).get("months", 0)),
+                  str((py.get(b["sheet"]) or {}).get("months", 0))]
+        for i, v in enumerate(values):
+            _cell_text(cells[i], v)
+    _set_widths(t, [6.0, 5.0, 2.0, 3.0, 3.0])
+
+
+OPINION_TEXT = {"unmodified": "Unmodified", "qualified": "Qualified", "adverse": "Adverse",
+                "disclaimer": "Disclaimer of conclusion"}
+
+
+def _assurance_annex(doc, a: dict, labels: dict) -> None:
+    """Independent assurance and the sign-off chain, from a signed engagement."""
+    doc.add_page_break()
+    h = doc.add_heading("ANNEXURE: INDEPENDENT ASSURANCE AND SIGN-OFF", level=1)
+    for run in h.runs:
+        run.font.name = FONT
+    signed = (a.get("signed_at") or "")[:10]
+    _para(doc, f"{a['level_label']} was obtained from {a['provider_name']} under {a['standard']}. "
+               f"Conclusion: {OPINION_TEXT.get(a['opinion'], a['opinion'])}. Signed by {a.get('signed_by') or ''} "
+               f"on {signed}. The full assurance statement is issued separately by the assurance provider.",
+          size=9.5)
+    if a.get("opinion_basis"):
+        _para(doc, f"Basis for conclusion: {a['opinion_basis']}", size=9.5, italic=True)
+    _para(doc, "Sign-off register — who prepared, reviewed, approved and assured each section", bold=True,
+          size=10.5, space_after=4)
+    cols = ["Section", "Prepared by", "Submitted by", "Internal review", "Approved by", "Tested by",
+            "Workpaper reviewed by"]
+    t = doc.add_table(rows=1, cols=len(cols))
+    t.style = "Table Grid"
+    for i, c in enumerate(cols):
+        _cell_text(t.rows[0].cells[i], c, bold=True)
+        _shade(t.rows[0].cells[i], "E8F3E3")
+    _repeat_header(t.rows[0])
+
+    def who(name, at):
+        return f"{name}\n{(at or '')[:10]}" if name else "–"
+
+    for r in a.get("register") or []:
+        cells = t.add_row().cells
+        prepared = list(r.get("prepared_by") or []) + [f"(platform: {x})" for x in r.get("system_sources") or []]
+        values = [r["section"], "; ".join(prepared) or "–",
+                  who(r.get("submitted_by"), r.get("submitted_at")),
+                  who(r.get("internal_reviewed_by"), r.get("internal_reviewed_at")),
+                  who(r.get("approved_by"), r.get("approved_at")), who(r.get("tested_by"), r.get("tested_at")),
+                  who(r.get("workpaper_reviewed_by"), r.get("workpaper_reviewed_at"))]
+        for i, v in enumerate(values):
+            _cell_text(cells[i], v)
+    _set_widths(t, [2.0, 5.0, 3.6, 3.6, 3.6, 3.6, 3.6])
+    _para(doc, f"Fingerprint of the assured BRSR answers (SHA-256): {a.get('content_hash')}", size=7.5,
+          color=GREY)
 
 
 def validate_brsr_docx(data: bytes) -> list[str]:

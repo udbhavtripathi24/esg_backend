@@ -44,6 +44,12 @@ PERMISSIONS: list[tuple[str, str]] = [
     ("audit:read", "View audit logs"),
     ("integration:manage", "Configure integrations"),
     ("notification:read", "Read own notifications"),
+    # --- Assurance ---
+    ("assurance:read", "View assurance engagements and their status"),
+    ("assurance:respond", "Answer assurance information requests and findings"),
+    ("assurance:manage", "Create assurance engagements and assign the team"),
+    ("assurance:perform", "Perform assurance fieldwork: workpapers, requests, findings"),
+    ("assurance:sign", "Sign the assurance opinion"),
 
 
 ]
@@ -60,12 +66,18 @@ ROLES: list[tuple[str, str, str]] = [
     ("Client Reviewer", "client", "Reviews their company's datasets"),
     ("Client Uploader", "client", "Uploads their company's datasets"),
     ("Client Approver", "client", "Approves their company's submissions"),
+    # Independent assurance (Deloitte's assurance practice or an external firm).
+    # Deliberately NOT given company-wide data access: assurers see only the
+    # engagements they are members of.
+    ("Assurance Partner", "deloitte", "Signs assurance opinions; leads assurance engagements"),
+    ("Assurance Practitioner", "deloitte", "Performs assurance fieldwork on assigned engagements"),
 ]
 
 # --- Role -> permission mappings -------------------------------------------
 # Kept explicit (no wildcards) so every grant is auditable.
 ROLE_PERMISSIONS: dict[str, list[str]] = {
     "Administrator": [
+        "assurance:read", "assurance:manage",
         "user:read", "user:manage", "company:read", "company:manage", "admin:manage",
         "dataset:read", "dataset:create", "dataset:update", "dataset:review",
         "comment:read", "comment:create",
@@ -74,6 +86,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "site:read", "site:manage", "business_unit:read", "business_unit:manage", "department:read", "department:manage", "upload_type:read", "upload_type:manage", "dataset:submit", "file:upload", "file:download", "audit:read", "integration:manage",
         "notification:read"],
     "Consultant": [
+        "assurance:read",
         "company:read", "user:read",
         "dataset:read", "dataset:create", "dataset:update", "dataset:review",
         "comment:read", "comment:create",
@@ -82,6 +95,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "site:read", "business_unit:read", "department:read", "upload_type:read", "dataset:submit", "file:upload", "file:download",
         "notification:read"],
     "Reviewer": [
+        "assurance:read",
         "company:read",
         "dataset:read", "dataset:review",
         "comment:read", "comment:create",
@@ -89,10 +103,12 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "site:read", "business_unit:read", "department:read", "upload_type:read", "file:download",
         "notification:read"],
     "Support": [
+        "assurance:read",
         "company:read", "user:read", "dataset:read", "comment:read", "report:read",
         "site:read", "business_unit:read", "department:read", "upload_type:read",
         "notification:read"],
     "Client Administrator": [
+        "assurance:read", "assurance:respond",
         "company:read", "user:read", "user:manage", "admin:manage",
         "dataset:read", "dataset:create", "dataset:update",
         "comment:read", "comment:create",
@@ -101,18 +117,27 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "site:read", "site:manage", "business_unit:read", "business_unit:manage", "department:read", "department:manage", "upload_type:read", "dataset:submit", "file:upload", "file:download", "audit:read", "integration:manage",
         "notification:read"],
     "Client Reviewer": [
+        "assurance:read", "assurance:respond",
         "company:read", "dataset:read", "dataset:review", "comment:read", "comment:create",
         "report:read", "benchmark:read", "assessment:respond",
         "site:read", "business_unit:read", "department:read", "upload_type:read", "file:download",
         "notification:read"],
     "Client Uploader": [
+        "assurance:read", "assurance:respond",
         "company:read", "dataset:read", "dataset:create", "comment:read", "comment:create",
         "assessment:respond",
         "site:read", "business_unit:read", "department:read", "upload_type:read", "dataset:submit", "file:upload", "file:download",
         "notification:read"],
     "Client Approver": [
+        "assurance:read", "assurance:respond",
         "company:read", "dataset:read", "dataset:review", "comment:read", "comment:create",
         "report:read", "assessment:respond",
         "site:read", "business_unit:read", "department:read", "upload_type:read", "file:download",
         "notification:read"],
+    "Assurance Partner": [
+        "company:read", "dataset:read", "comment:read", "report:read", "file:download", "notification:read",
+        "assurance:read", "assurance:perform", "assurance:sign", "assurance:manage"],
+    "Assurance Practitioner": [
+        "company:read", "dataset:read", "comment:read", "report:read", "file:download", "notification:read",
+        "assurance:read", "assurance:perform"],
 }

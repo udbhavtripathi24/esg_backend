@@ -33,7 +33,10 @@ def _set_pid() -> str: return generate_public_id("brs_")
 def _comment_pid() -> str: return generate_public_id("brc_")
 
 
-SECTION_STATUSES = ("draft", "submitted", "approved", "changes_requested")
+# "internally_approved" is used only when the company requires an internal
+# (client-side) review before Deloitte's: draft -> submitted ->
+# internally_approved -> approved.
+SECTION_STATUSES = ("draft", "submitted", "internally_approved", "approved", "changes_requested")
 EDITABLE_STATUSES = ("draft", "changes_requested")
 
 
@@ -66,6 +69,14 @@ class BrsrSection(SQLModel, table=True):
     decided_by: Optional[int] = Field(default=None, foreign_key="user.id")
     decided_at: Optional[datetime] = None
     decision_note: Optional[str] = None
+    # Tier 1 (client internal review), when the company requires it
+    internal_reviewed_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    internal_reviewed_at: Optional[datetime] = None
+    internal_review_note: Optional[str] = None
+    # Fingerprint of the figures built from the data sheets when Deloitte
+    # approved the section. If approved sheet data changes afterwards the
+    # section is flagged and the report is held until it is re-approved.
+    approved_data_hash: Optional[str] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -115,3 +126,51 @@ class BrsrComment(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     resolved_at: Optional[datetime] = None
     resolved_by: Optional[int] = Field(default=None, foreign_key="user.id")
+
+
+# ---------------------------------------------------------------------------
+# Per-question workflow (bank v3)
+# ---------------------------------------------------------------------------
+# The questionnaire is answered by department SPOCs and each answer is
+# approved by the department's reviewer before the section can go to
+# Deloitte:  open -> submitted -> approved   (or -> returned -> open)
+# Any change to an answer puts it back to "open".
+
+QUESTION_STATUSES = ("open", "submitted", "approved", "returned")
+DEPARTMENT_ROLES = ("spoc", "reviewer")
+
+
+class BrsrDepartmentRole(SQLModel, table=True):
+    """Who answers (SPOC) and who approves (reviewer) a department's BRSR
+    questions at a company. People are platform users; names are never
+    imported from engagement files."""
+    __tablename__ = "brsr_department_roles"
+    __table_args__ = (UniqueConstraint("company_id", "department", "user_id", "role", name="uq_brsr_dept_role"),
+                      Index("ix_brsr_dept_role_company", "company_id"))
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="company.id")
+    department: str
+    user_id: int = Field(foreign_key="user.id", index=True)
+    role: str  # spoc | reviewer
+    created_by: int = Field(foreign_key="user.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class BrsrQuestionStatus(SQLModel, table=True):
+    __tablename__ = "brsr_question_status"
+    __table_args__ = (UniqueConstraint("response_set_id", "question_id", name="uq_brsr_question_status"),
+                      Index("ix_brsr_qstatus_set_section", "response_set_id", "section_code"))
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    response_set_id: int = Field(foreign_key="brsr_response_sets.id")
+    section_code: str
+    question_id: str
+    status: str = Field(default="open")
+    answer_revision: Optional[int] = None  # the revision that was submitted / approved
+    submitted_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    submitted_at: Optional[datetime] = None
+    reviewed_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    reviewed_at: Optional[datetime] = None
+    note: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

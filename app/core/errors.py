@@ -10,8 +10,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 class AppError(Exception):
-    def __init__(self, code: str, message: str, status_code: int = 400, field: str | None = None):
+    def __init__(self, code: str, message: str, status_code: int = 400, field: str | None = None,
+                 details: dict | None = None):
         self.code = code
+        self.details = details
         self.message = message
         self.status_code = status_code
         self.field = field
@@ -27,14 +29,18 @@ class PermissionError_(AppError):
         super().__init__("forbidden", message, status_code=403)
 
 
-def _body(code: str, message: str, field: str | None = None):
-    return {"error": {"code": code, "message": message, "field": field}}
+def _body(code: str, message: str, field: str | None = None, details: dict | None = None):
+    err = {"code": code, "message": message, "field": field}
+    if details:
+        err["details"] = details
+    return {"error": err}
 
 
 def register_error_handlers(app):
     @app.exception_handler(AppError)
     async def _app_error(_request: Request, exc: AppError):
-        return JSONResponse(status_code=exc.status_code, content=_body(exc.code, exc.message, exc.field))
+        return JSONResponse(status_code=exc.status_code, content=_body(exc.code, exc.message, exc.field,
+                                                                         getattr(exc, "details", None)))
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_request: Request, exc: RequestValidationError):

@@ -812,10 +812,10 @@ P3 = _ess([
           "rehabilitated and placed in suitable employment or whose family members have been placed in suitable "
           "employment",
           [row("employees", "Employees"), row("workers", "Workers")],
-          [col("cy_affected", "Total affected — " + PERIOD_LABEL["cy"]),
-           col("py_affected", "Total affected — " + PERIOD_LABEL["py"]),
-           col("cy_placed", "Rehabilitated / placed — " + PERIOD_LABEL["cy"], lte="cy_affected"),
-           col("py_placed", "Rehabilitated / placed — " + PERIOD_LABEL["py"], lte="py_affected")]),
+          [dict(col("cy_affected", "Total affected — " + PERIOD_LABEL["cy"]), period="cy"),
+           dict(col("py_affected", "Total affected — " + PERIOD_LABEL["py"]), period="py"),
+           dict(col("cy_placed", "Rehabilitated / placed — " + PERIOD_LABEL["cy"], lte="cy_affected"), period="cy"),
+           dict(col("py_placed", "Rehabilitated / placed — " + PERIOD_LABEL["py"], lte="py_affected"), period="py")]),
     yesno_q("P3.L4", "4", "Does the entity provide transition assistance programs to facilitate continued "
             "employability and the management of career endings resulting from retirement or termination of "
             "employment? (Yes/ No)"),
@@ -1391,38 +1391,75 @@ QUESTIONS: list[dict] = (
     + _tag("P4", P4) + _tag("P5", P5) + _tag("P6", P6) + _tag("P7", P7) + _tag("P8", P8) + _tag("P9", P9)
 )
 
-# --- Annual data: one "metrics" question per area, each area its own section
+# --- Quantitative cells built from the approved data sheets (bank v3) -----
+# A cell is built from the sheets only when every figure in its expression has
+# a sheet source; any other cell is typed by the company in the BRSR table
+# itself (e.g. turnover, net worth, Scope 1/2 emissions).
 from app.brsr import formula as _F  # noqa: E402
-from app.brsr.annual_data import AREAS, DERIVE, DERIVED_STILL_REQUIRED, METRIC_AREA, METRICS  # noqa: E402
+from app.brsr.annual_data import DERIVE, DERIVED_STILL_REQUIRED, ROW_DERIVE  # noqa: E402
+from app.brsr.sheet_sources import COMPUTED as _COMPUTED, SOURCED, SOURCES as _SOURCES  # noqa: E402
+from app.datasheets.catalog import SHEETS as _SHEETS  # noqa: E402
 
-for _a in AREAS:
-    SECTIONS.insert(len([s for s in SECTIONS if s.get("kind") == "data"]),
-                    {"code": _a["code"], "title": _a["title"], "kind": "data", "intro": _a["intro"],
-                     "departments": _a["departments"]})
 for _s in SECTIONS:
     _s.setdefault("kind", "disclosure")
 SECTION_CODES[:] = [s["code"] for s in SECTIONS]
 
-DATA_QUESTIONS = [{"id": f"D.{_a['code']}", "number": "", "prompt": _a["title"], "type": "metrics",
-                   "section": _a["code"], "group": _a["title"], "required": True, "groups": _a["groups"],
-                   "departments": _a["departments"]} for _a in AREAS]
+
+def metric_sheets(name: str) -> set[str]:
+    if name in _SOURCES:
+        return {p.sheet for p in _SOURCES[name].parts}
+    if name in _COMPUTED:
+        return set().union(*(metric_sheets(d) for d in _COMPUTED[name][0]))
+    return set()
+
+
+def _typed_cells(q: dict, spec: dict) -> int:
+    """Current-year input cells not built from the sheets."""
+    if q["type"] == "number":
+        return 0 if "value" in spec else 1
+    if q["type"] == "fields":
+        return sum(1 for f in q["fields"] if f"fields.{f['key']}" not in spec and not f.get("readonly"))
+    n = 0
+    for r in q["rows"]:
+        if r.get("header") or r.get("formula"):
+            continue
+        for c in q["columns"]:
+            if c["kind"] == "computed" or (c.get("period") and c["period"] != "cy"):
+                continue
+            base = c["key"][len(c["period"]) + 1:] if c.get("period") else c["key"]
+            if f"{r['key']}.{base}" not in spec:
+                n += 1
+    return n
+
 
 for _q in QUESTIONS:
-    if _q["id"] in DERIVE:
-        _src = set()
-        for _expr in DERIVE[_q["id"]].values():
-            _src |= {METRIC_AREA[n] for n in _F.names_in(_expr) if n in METRIC_AREA}
-        _q["derive"] = DERIVE[_q["id"]]
-        _q["derived_from"] = sorted(_src)
+    _deps = set(QUESTION_DEPARTMENTS.get(_q["id"], ["ESG & CSR"]))
+    _spec = {cell: expr for cell, expr in DERIVE.get(_q["id"], {}).items() if _F.names_in(expr) <= SOURCED}
+    _sheets: set[str] = set()
+    for _expr in _spec.values():
+        for _n in _F.names_in(_expr):
+            _sheets |= metric_sheets(_n)
+    _rows = ROW_DERIVE.get(_q["id"])
+    if _rows:
+        _q["derive_rows"] = _rows
+        _sheets |= set(_rows["sheets"])
+    if _spec:
+        _q["derive"] = _spec
         _q["required"] = _q["id"] in DERIVED_STILL_REQUIRED
-        _deps = set(QUESTION_DEPARTMENTS.get(_q["id"], []))
-        for _code in _src:
-            _deps |= set(next(a["departments"] for a in AREAS if a["code"] == _code))
-        _q["departments"] = sorted(_deps)
+    if _sheets:
+        _q["derived_from"] = sorted(_sheets)
+        _q["derived_from_titles"] = [_SHEETS[x]["title"] for x in sorted(_sheets)]
+        for _x in _sheets:
+            _deps |= set(_SHEETS[_x]["departments"])
+    # Where the answer comes from: the questionnaire, the data sheets, or both.
+    if (_spec and not _typed_cells(_q, _spec)) or (_rows and "table" in _rows):
+        _q["source"] = "data"
+    elif _spec or _rows:
+        _q["source"] = "both"
     else:
-        _q["departments"] = QUESTION_DEPARTMENTS.get(_q["id"], ["ESG & CSR"])
+        _q["source"] = "qualitative"
+    _q["departments"] = sorted(_deps)
 
-QUESTIONS = DATA_QUESTIONS + QUESTIONS
 QUESTIONS_BY_ID: dict[str, dict] = {q["id"]: q for q in QUESTIONS}
 
 # Conditional requirements: (question, depends_on, answer_that_makes_it_required)
@@ -1491,7 +1528,7 @@ def _self_check() -> None:
         if not q.get("derive"):
             continue
         for cell, expr in q["derive"].items():
-            unknown = F.names_in(expr) - set(METRICS)
+            unknown = F.names_in(expr) - SOURCED
             if unknown:
                 raise ValueError(f"{q['id']} {cell}: unknown metrics {unknown}")
             if q["type"] == "number":
@@ -1552,4 +1589,4 @@ def public_bank() -> dict:
     return {"sections": SECTIONS, "questions": QUESTIONS, "version": BANK_VERSION, "departments": DEPARTMENTS}
 
 
-BANK_VERSION = "sebi-2023-122.v2-annual-data"
+BANK_VERSION = "sebi-2023-122.v3-datasheets"

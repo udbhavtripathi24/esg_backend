@@ -149,5 +149,6 @@ def test_rbac_roles_returns_real_roles(client, session):
     roles = r.json()
     deloitte_roles = {x["code"] for x in roles if x["scope"] == "deloitte"}
     client_roles = {x["code"] for x in roles if x["scope"] == "client"}
-    assert deloitte_roles == {"Administrator", "Consultant", "Reviewer", "Support"}
+    assert deloitte_roles == {"Administrator", "Consultant", "Reviewer", "Support",
+                              "Assurance Partner", "Assurance Practitioner"}
     assert client_roles == {"Client Administrator", "Client Reviewer", "Client Uploader", "Client Approver"}

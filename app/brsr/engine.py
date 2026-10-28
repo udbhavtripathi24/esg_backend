@@ -34,6 +34,7 @@ from typing import Any, Callable, Optional
 
 from app.brsr import formula as F
 from app.brsr.annual_data import METRIC_GROUP_SHOW_IF, METRICS, PLAUSIBILITY
+from app.brsr.sheet_metrics import SHEET_KEY
 from app.brsr.question_bank import (
     CONDITIONAL_REQUIRED, CONSISTENCY_CHECKS, PRINCIPLES, QUESTIONS, QUESTIONS_BY_ID, YESNO_OPTIONS,
 )
@@ -136,6 +137,21 @@ def derive_key(col: dict, rk: str) -> Optional[str]:
 
 
 def is_derived_cell(q: dict, rk: str, col: dict) -> bool:
+    """A cell always built from the data sheets — current year, or a column
+    without a year. Never stored: whatever the client sends is dropped."""
+    if col.get("period") == "py":
+        return False
+    key = derive_key(col, rk)
+    return bool(q.get("derive")) and key is not None and key in q["derive"]
+
+
+def is_py_derivable(q: dict, rk: str, col: dict) -> bool:
+    """A previous-year cell built from the sheets *when* the previous year's
+    sheets have been approved; otherwise the client types it (e.g. the first
+    year on the platform). A typed value is kept and shown only while no
+    sheet value exists."""
+    if col.get("period") != "py":
+        return False
     key = derive_key(col, rk)
     return bool(q.get("derive")) and key is not None and key in q["derive"]
 
@@ -276,13 +292,15 @@ METRIC_QUESTIONS = [q for q in QUESTIONS if q["type"] == "metrics"]
 
 
 def metric_values(answers: dict[str, dict]) -> dict[str, dict[str, Any]]:
-    """Annual data by year: {"cy": {metric: value}, "py": {...}}.
+    """Figures by year: {"cy": {metric: value}, "py": {...}}, from the
+    approved data sheets (injected by the service under SHEET_KEY).
 
-    Fields in a group hidden by its ``show_if`` (e.g. worker questions for an
+    Fields in a group hidden by its ``show_if`` (e.g. worker figures for an
     entity with no workers) count as 0, so the tables built from them show
     0 rather than blank."""
-    out: dict[str, dict[str, Any]] = {"cy": {}, "py": {}}
-    for q in METRIC_QUESTIONS:
+    sheet = answers.get(SHEET_KEY) or {}
+    out: dict[str, dict[str, Any]] = {"cy": dict(sheet.get("cy") or {}), "py": dict(sheet.get("py") or {})}
+    for q in METRIC_QUESTIONS:  # legacy annual form (bank v2); empty since v3
         a = answers.get(q["id"]) or {}
         out["cy"].update(a.get("values") or {})
         out["py"].update(a.get("py") or {})
@@ -324,7 +342,14 @@ def apply_derivations(answers: dict[str, dict]) -> dict[str, dict]:
             return vals.get(expr.strip())
         return F.evaluate(expr, lambda n: vals.get(n))
 
+    tables = (answers.get(SHEET_KEY) or {}).get("cy_tables") or {}
     for q in QUESTIONS:
+        rspec = q.get("derive_rows")
+        if rspec:
+            derived_rows = _derive_rows(rspec, answers.get(q["id"]) or {}, tables, ev)
+            if derived_rows is not None:
+                out[q["id"]] = {**{k: v for k, v in (answers.get(q["id"]) or {}).items()
+                                   if k not in ("na", "na_reason", "none")}, "rows": derived_rows}
         spec = q.get("derive")
         if not spec:
             continue
@@ -349,14 +374,50 @@ def apply_derivations(answers: dict[str, dict]) -> dict[str, dict]:
                 key = derive_key(c, r["key"])
                 if key is None or key not in spec:
                     continue
-                v = ev(spec[key], c.get("period") or "cy")
+                period = c.get("period") or "cy"
+                v = ev(spec[key], period)
                 if v is None:
-                    cells.get(r["key"], {}).pop(c["key"], None)
+                    if period != "py":  # a typed previous-year figure stands until the sheets cover that year
+                        cells.get(r["key"], {}).pop(c["key"], None)
                 else:
                     cells.setdefault(r["key"], {})[c["key"]] = v
         derived = {k: v for k, v in stored.items() if k not in ("na", "na_reason")}
         derived["cells"] = cells
         out[q["id"]] = derived
+    return out
+
+
+def _derive_rows(rspec: dict, stored: dict, tables: dict, ev: Callable[[str, str], Any]) -> Optional[list]:
+    """Rows for a list question built from the sheets, or None to keep the
+    stored (typed) rows — when the sheets have nothing for the year."""
+    if "table" in rspec:
+        rows = tables.get(rspec["table"])
+        if not rows:
+            return None
+        return [{k: r.get(k) for k in rspec["columns"]} for r in rows]
+    vals = {k: ev(expr, "cy") for k, expr in rspec["single"].items()}
+    if all(v is None for v in vals.values()):
+        return None
+    first = dict((stored.get("rows") or [{}])[0])
+    first.update({k: v for k, v in vals.items()})
+    return [first]
+
+
+def derived_py_cells(q: dict, answers: dict[str, dict]) -> list[list[str]]:
+    """[row, column] of previous-year cells currently built from the sheets."""
+    if q["type"] != "table" or not q.get("derive"):
+        return []
+    mv = metric_values(answers)["py"]
+    out = []
+    for r in q["rows"]:
+        if r.get("header") or r.get("formula"):
+            continue
+        for c in q["columns"]:
+            if not is_py_derivable(q, r["key"], c):
+                continue
+            expr = q["derive"][derive_key(c, r["key"])]
+            if F.evaluate(expr, lambda n: mv.get(n)) is not None:
+                out.append([r["key"], c["key"]])
     return out
 
 
@@ -515,7 +576,9 @@ def _lte_label(expr: str) -> str:
 
 def is_answered(q: dict, ans: Optional[dict], answers: dict[str, dict] | None = None) -> bool:
     if q.get("derive") and not q.get("required"):
-        return True  # built from annual data
+        return True  # built from the data sheets
+    if q.get("derive_rows") and "table" in q["derive_rows"]:
+        return True
     if q["type"] == "metrics":
         return bool(ans) and not metric_fields_missing(q, ans, answers)
     if not ans:
@@ -660,17 +723,34 @@ def validate_answer(qid: str, ans: Optional[dict], answers: dict[str, dict],
         # Constraints are checked on computed grids so totals rows are covered too.
         # Tables built from annual data are validated there, at the source,
         # so an HR data error never blocks another department's section.
-        grid = {} if q.get("derive") else comp.grid(qid)
+        # Tables built from the data sheets report broken constraints as
+        # warnings: the figures were validated at upload and are corrected
+        # there, so they never block another department's section.
+        grid = comp.grid(qid)
+        level = "warning" if q.get("derive") else "error"
         for rk, rv in grid.items():
             for c in q["columns"]:
                 if "lte" in c:
                     a, b = rv.get(c["key"]), rv.get(c["lte"])
-                    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and a > b:
+                    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and a > b + 1e-9:
                         other = cols[c["lte"]]
                         issues.append(_issue(
-                            "error", qid,
+                            level, qid,
                             f"{rows[rk]['label']}: {c['label']} ({_fmt(a)}) cannot exceed "
                             f"{other['label']} ({_fmt(b)})", f"cells.{rk}.{c['key']}"))
+        # Percentages built from the sheets cannot exceed 100% unless the
+        # source figures disagree (e.g. top-10 dealers selling more than all
+        # dealers) — say so, so it is corrected in the data sheet.
+        if q.get("derive"):
+            for rk, rv in grid.items():
+                for c in q["columns"]:
+                    if c["kind"] not in ("percent", "rate") or not is_derived_cell(q, rk, c):
+                        continue
+                    v = rv.get(c["key"])
+                    if isinstance(v, (int, float)) and v > 100 + 1e-9:
+                        issues.append(_issue(
+                            "warning", qid, f"{rows[rk]['label']}: {_fmt(round(v, 2))}% is over 100% — the figures in "
+                                            f"the data sheets disagree; check them", f"cells.{rk}.{c['key']}"))
         if qid in ("A.20a", "A.20b") and not q.get("derive"):
             for rk, rv in grid.items():
                 t_, m, fe = rv.get("total"), rv.get("male"), rv.get("female")
@@ -768,6 +848,9 @@ def section_report(section: str, answers: dict[str, dict]) -> dict:
         elif q["id"] in req:
             missing.append(q["id"])
         issues += validate_answer(q["id"], a, answers, comp)
+        if q.get("derive") and not a:
+            issues += validate_answer(q["id"], {"cells": {}}, answers, comp) if q["type"] == "table" else []
+        issues += data_gaps(q, answers, comp)
     section_ids = {q["id"] for q in questions}
     issues += [w for w in consistency_warnings(answers, comp) if w["question_id"] in section_ids]
     if field_total:  # annual-data sections: progress is counted in fields, not questions
@@ -789,6 +872,27 @@ def section_report(section: str, answers: dict[str, dict]) -> dict:
     }
 
 
+def data_gaps(q: dict, answers: dict[str, dict], comp: "Computer") -> list[dict]:
+    """A warning when a table built from the sheets has current-year cells
+    left blank because a sheet has no approved data for the year."""
+    if not q.get("derive") or q["type"] != "table":
+        return []
+    cov = (answers.get(SHEET_KEY) or {}).get("cy_coverage") or {}
+    mv = metric_values(answers)["cy"]
+    # Blank because an input figure is missing — not because the figure is
+    # undefined (e.g. a worker turnover rate when there are no workers).
+    blank = any(mv.get(n) is None for expr in q["derive"].values() for n in F.names_in(expr))
+    if not blank:
+        return []
+    from app.datasheets.catalog import SHEETS
+    missing = [SHEETS[s]["title"] for s in q.get("derived_from") or [] if not (cov.get(s) or {}).get("rows")]
+    if missing:
+        msg = f"Waiting for approved data: {', '.join(missing)}. These cells fill in once it is approved."
+    else:
+        msg = "Some cells are blank: the data sheets for this year do not contain these figures."
+    return [_issue("warning", q["id"], msg, "data")]
+
+
 def computed_view(qid: str, answers: dict[str, dict], computer: Optional[Computer] = None) -> Optional[dict]:
     """Cells the platform fills — calculated cells, and cells built from the
     annual data — for display alongside the stored inputs. For a derived
@@ -797,16 +901,21 @@ def computed_view(qid: str, answers: dict[str, dict], computer: Optional[Compute
     comp = computer or Computer(answers)
     if q.get("derive") and q["type"] in ("number", "fields"):
         return {"derived_answer": comp.answers.get(qid)}
+    if q.get("derive_rows"):
+        derived = comp.answers.get(qid) or {}
+        stored = answers.get(qid) or {}
+        return {"derived_rows": derived.get("rows") if derived is not stored else None}
     if q["type"] != "table":
         return None
     grid = comp.grid(qid)
     rows = {r["key"]: r for r in q["rows"]}
     cols = {c["key"]: c for c in q["columns"]}
+    py_cells = derived_py_cells(q, comp.answers)
     out: dict[str, dict] = {}
     for rk, rv in grid.items():
         for ck, v in rv.items():
             if cols[ck]["kind"] == "computed" or (rows[rk].get("formula") and cols[ck]["kind"] in NUMERIC_KINDS) \
-                    or is_derived_cell(q, rk, cols[ck]):
+                    or is_derived_cell(q, rk, cols[ck]) or [rk, ck] in py_cells:
                 out.setdefault(rk, {})[ck] = v
     return out
 

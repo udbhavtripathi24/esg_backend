@@ -36,6 +36,15 @@ from app.storage.factory import build_storage_key
 from app.storage.local import LocalFilesystemStorage
 
 
+def content_disposition(filename: str) -> str:
+    """RFC 6266 attachment header that survives quotes and non-Latin names:
+    an ASCII fallback plus the exact UTF-8 name."""
+    from urllib.parse import quote
+    name = (filename or "download").replace("\r", " ").replace("\n", " ")
+    fallback = "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in name) or "download"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
 router = APIRouter(tags=["datasets"])
 
 
@@ -322,6 +331,45 @@ def submit_version(public_id: str, version_public_id: str, request: Request,
 
 # ---------- Files ----------
 
+def _validate_datasheet(session, upload_type, version, filename, content):
+    """Strict check for data-sheet upload types; None for any other type.
+
+    Refuses the file (422, every problem listed with row and column) rather
+    than accepting it and failing at extraction after approval. Also refuses
+    a file whose rows repeat rows already in another file of this version,
+    which would otherwise be counted twice.
+    """
+    from app.datasheets.service import parse_sheet, sheet_of_upload_type
+    sheet = sheet_of_upload_type(upload_type.code if upload_type else None)
+    if not sheet:
+        return None
+    parsed = parse_sheet(sheet, filename, content)
+    if not parsed.ok:
+        raise AppError("datasheet_invalid",
+                       f"The file has {len(parsed.errors)} problem(s). Fix them and upload again.", 422,
+                       details=parsed.summary(limit=200))
+    others = session.exec(select(DatasetFile).where(
+        DatasetFile.dataset_version_id == version.id, DatasetFile.role == "data",
+        DatasetFile.deleted_at.is_(None))).all()
+    if others:
+        from app.datasheets.service import row_keys
+        mine = row_keys(parsed)
+        storage = get_storage()
+        for f in others:
+            try:
+                prev = parse_sheet(sheet, f.original_filename, storage.get(f.storage_key).read())
+            except Exception:  # noqa: BLE001 — unreadable older file: not this upload's problem
+                continue
+            clash = mine & row_keys(prev)
+            if clash:
+                start, end, loc = sorted(clash)[0][:3]
+                raise AppError("datasheet_overlap",
+                               f"{len(clash)} row(s) repeat rows already in {f.original_filename} "
+                               f"(e.g. {loc or 'no location'}, {start}–{end}). Each month and location "
+                               f"may appear in only one file of a version.", 409)
+    return parsed
+
+
 _MAX_HEAD_BYTES = 8192
 
 
@@ -365,6 +413,10 @@ async def upload_file(public_id: str, version_public_id: str, request: Request,
     if not result.ok:
         raise AppError(result.error_code, result.error_message, 400)
 
+    sheet_check = None
+    if role == "data":
+        sheet_check = _validate_datasheet(session, upload_type, v, file.filename or "", content)
+
     file_public_id = generate_public_id("df_")
     key = build_storage_key(
         company_id=ds.company_id, dataset_public_id=ds.public_id,
@@ -391,10 +443,15 @@ async def upload_file(public_id: str, version_public_id: str, request: Request,
     )
     session.add(job); session.flush()
 
+    changes = {"filename": file.filename, "size_bytes": stored.size_bytes,
+               "role": role, "mime": result.detected_mime}
+    if sheet_check is not None:
+        changes["datasheet"] = {"rows": len(sheet_check.rows), "warnings": len(sheet_check.warnings),
+                                "period_start": str(sheet_check.period_start),
+                                "period_end": str(sheet_check.period_end)}
     log_action(session, actor, "file.uploaded", "dataset_file", df.id, df.public_id,
                company_id=ds.company_id,
-               changes={"filename": file.filename, "size_bytes": stored.size_bytes,
-                        "role": role, "mime": result.detected_mime},
+               changes=changes,
                ip_address=request.client.host if request.client else None,
                user_agent=request.headers.get("user-agent"))
     session.commit(); session.refresh(df)
@@ -427,7 +484,7 @@ def download_file(public_id: str, request: Request,
         session.commit()
         return StreamingResponse(
             stream, media_type=f.mime_type,
-            headers={"Content-Disposition": f'attachment; filename="{f.original_filename}"'},
+            headers={"Content-Disposition": content_disposition(f.original_filename)},
         )
     # GCS path — return signed URL
     signed = storage.signed_url(f.storage_key, expires_in=300)
@@ -469,11 +526,31 @@ def download_signed(encoded_key: str, expires: int, sig: str,
             mime_type, original_filename = artifact.mime_type, artifact.original_filename
 
     if mime_type is None:
+        from app.models.evidence import EvidenceFile
+        ev = session.exec(select(EvidenceFile).where(EvidenceFile.storage_key == key,
+                                                     EvidenceFile.deleted_at.is_(None))).first()
+        if ev:
+            mime_type, original_filename = ev.mime_type, ev.original_filename
+
+    if mime_type is None:
+        from app.models.survey import SurveyFile
+        sf = session.exec(select(SurveyFile).where(SurveyFile.storage_key == key,
+                                                   SurveyFile.deleted_at.is_(None))).first()
+        if sf:
+            mime_type, original_filename = sf.mime_type, sf.original_filename
+
+    if mime_type is None:
+        from app.assurance.documents import artifact_for_key
+        found = artifact_for_key(session, key)
+        if found:
+            mime_type, original_filename = found
+
+    if mime_type is None:
         raise NotFoundError("File not found")
 
     storage = get_storage()
     stream = storage.get(key)
     return StreamingResponse(
         stream, media_type=mime_type,
-        headers={"Content-Disposition": f'attachment; filename="{original_filename}"'},
+        headers={"Content-Disposition": content_disposition(original_filename)},
     )

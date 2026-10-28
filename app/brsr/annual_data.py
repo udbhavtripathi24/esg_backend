@@ -1,7 +1,12 @@
-"""Annual data — the short quantitative form behind the BRSR.
+"""BRSR derivations: which table cells are built from figures, and how.
 
-Why this exists
----------------
+Since bank v3 the figures come from the approved data sheets
+(app/brsr/sheet_sources.py says where each one comes from). The annual
+form below (AREAS) is kept only so response sets started on bank v2 can be
+upgraded (app/brsr/upgrade.py); it is no longer shown.
+
+History (v2)
+------------
 SEBI's BRSR asks for ~40 large quantitative tables (headcount by gender,
 benefits coverage, training, wages, complaints, energy, water, waste…),
 each with a current-year and previous-year column. Typing those tables
@@ -60,11 +65,12 @@ def group(title: str, fields: list[dict], *, show_if: str | None = None, note: s
 # Expressions reused below
 EMP_M = "emp_perm_m + emp_oth_m"
 EMP_F = "emp_perm_f + emp_oth_f"
-EMP_ALL = "emp_perm_m + emp_perm_f + emp_oth_m + emp_oth_f"
+EMP_ALL = "emp_perm_m + emp_perm_f + emp_perm_o + emp_oth_m + emp_oth_f + emp_oth_o"
 WRK_M = "wrk_perm_m + wrk_oth_m"
 WRK_F = "wrk_perm_f + wrk_oth_f"
-WRK_ALL = "wrk_perm_m + wrk_perm_f + wrk_oth_m + wrk_oth_f"
+WRK_ALL = "wrk_perm_m + wrk_perm_f + wrk_perm_o + wrk_oth_m + wrk_oth_f + wrk_oth_o"
 HAS_WORKERS = WRK_ALL  # groups about workers are shown only when the entity has workers
+PLACES = "plants_national + offices_national + plants_international + offices_international"
 
 AREAS: list[dict] = [
     {"code": "WF", "title": "Workforce & diversity", "departments": ["HR"],
@@ -508,13 +514,12 @@ KWH_TO_GJ = "0.0036"
 def _gender_rows(prefix_emp: str, prefix_wrk: str) -> dict:
     """Rows employees_perm / employees_other / workers_perm / workers_other."""
     out = {}
-    for row, (m_, f_) in {
-        "employees_perm": (f"{prefix_emp}emp_perm_m", f"{prefix_emp}emp_perm_f"),
-        "employees_other": (f"{prefix_emp}emp_oth_m", f"{prefix_emp}emp_oth_f"),
-        "workers_perm": (f"{prefix_wrk}wrk_perm_m", f"{prefix_wrk}wrk_perm_f"),
-        "workers_other": (f"{prefix_wrk}wrk_oth_m", f"{prefix_wrk}wrk_oth_f"),
+    for row, base in {
+        "employees_perm": f"{prefix_emp}emp_perm", "employees_other": f"{prefix_emp}emp_oth",
+        "workers_perm": f"{prefix_wrk}wrk_perm", "workers_other": f"{prefix_wrk}wrk_oth",
     }.items():
-        out[f"{row}.total"] = f"{m_} + {f_}"
+        m_, f_ = f"{base}_m", f"{base}_f"
+        out[f"{row}.total"] = f"{m_} + {f_} + {base}_o"  # total includes other genders
         out[f"{row}.male"] = m_
         out[f"{row}.female"] = f_
     return out
@@ -550,7 +555,7 @@ DERIVE: dict[str, dict[str, str]] = {
     "A.18": {"national.plants": "plants_national", "national.offices": "offices_national",
              "international.plants": "plants_international", "international.offices": "offices_international"},
     "A.19a": {"national.number": "states_served", "international.number": "countries_served"},
-    "A.19b": {"value": "pct(exports, turnover)"},
+    "A.19b": {"value": "pct(exports, revenue)"},  # revenue from operations = turnover (Companies Act s.2(91))
     "A.20a": _gender_rows("", ""),
     "A.20b": _gender_rows("da_", "da_"),
     "A.21": {"bod.total": "bod_m + bod_f", "bod.female": "bod_f",
@@ -635,6 +640,46 @@ DERIVE: dict[str, dict[str, str]] = {
         ("essential_services", "ess"), ("restrictive", "rtp"), ("unfair", "utp"), ("other", "other"))
         for c in ("received", "pending")},
     "P9.E7": {"breaches.value": "breaches", "pii_breaches.value": "pii_breaches"},
+    # --- v3: questions now built from the data sheets ---------------------
+    "P1.E9": {"p_trading_pct.v": "pct(fin_purch_trading, fin_purchases)", "p_trading_count.v": "fin_trading_houses",
+              "p_top10_pct.v": "pct(fin_purch_top10, fin_purch_trading)",
+              "s_dealer_pct.v": "pct(fin_sales_dealers, fin_sales)", "s_dealer_count.v": "fin_dealers",
+              "s_top10_pct.v": "pct(fin_sales_top10, fin_sales_dealers)",
+              "r_purchases.v": "pct(fin_purch_rp, fin_purchases)", "r_sales.v": "pct(fin_sales_rp, fin_sales)",
+              "r_loans.v": "pct(fin_loans_rp, fin_loans)", "r_investments.v": "pct(fin_inv_rp, fin_inv)"},
+    "P2.L4": {f"{row}.{c}": f"recl_{k}_{c}" for row, k in (("plastics", "plastic"), ("ewaste", "ewaste"))
+              for c in ("reused", "recycled", "disposed")},
+    "P3.E14": {"health_safety.pct": f"pct(own_assessed_hs, {PLACES})",
+               "working_conditions.pct": f"pct(own_assessed_wc, {PLACES})"},
+    "P3.L3": {f"{row}.{c}": f"hc_{c}_{who}" for row, who in (("employees", "emp"), ("workers", "wrk"))
+              for c in ("affected", "placed")},
+    "P3.L5": {"health_safety.pct": "pct(vc_assessed_hs, suppliers)",
+              "working_conditions.pct": "pct(vc_assessed_wc, suppliers)"},
+    "P5.E10": {f"{row}.pct": f"pct(own_assessed_{k}, {PLACES})" for row, k in (
+        ("child_labour", "child"), ("forced_labour", "forced"), ("sexual_harassment", "sh"),
+        ("discrimination", "disc"), ("wages", "wages"), ("others", "others"))},
+    "P5.L4": {f"{row}.pct": f"pct(vc_assessed_{k}, suppliers)" for row, k in (
+        ("sexual_harassment", "sh"), ("discrimination", "disc"), ("child_labour", "child"),
+        ("forced_labour", "forced"), ("wages", "wages"), ("others", "others"))},
+    "P6.E6": {f"{k}.v": f"air_{k}" for k in ("nox", "sox", "pm", "pop", "voc", "hap", "others")},
+    "P6.L1b": {**{f"{row}.v": f"stress_w_{k}" for row, k in (
+        ("surface", "surface"), ("ground", "ground"), ("third_party", "third_party"), ("sea", "sea"),
+        ("others", "other"), ("consumption", "consumption"))},
+        **{f"x_{dest}_{t}.v": f"stress_wd_{src}_{t}" for dest, src in (
+            ("surface", "surface"), ("ground", "ground"), ("sea", "sea"), ("third_party", "third"),
+            ("others", "other")) for t in ("none", "treated")}},
+    "P6.L7": {"value": "pct(vc_env_assessed, suppliers)"},
+}
+
+# Questions answered as a list of rows, built from the data sheets:
+#   "table": one BRSR row per entry of a sheet-built table (sheet_metrics.tables_for)
+#   "single": one row whose listed columns are built; other columns stay typed
+ROW_DERIVE: dict[str, dict] = {
+    "P8.L6": {"table": "csr_projects", "columns": ["project", "beneficiaries", "pct_vulnerable"],
+              "sheets": ["community_development"]},
+    "P1.L1": {"single": {"programmes": "vc_awareness_programmes",
+                         "pct_covered": "pct(vc_awareness_covered, suppliers)"},
+              "sheets": ["supply_chain_admin", "supply_chain_tech"]},
 }
 
 # Derived questions that still need some manual input from the client

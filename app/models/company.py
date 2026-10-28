@@ -34,6 +34,9 @@ class Company(CompanyBase, table=True):
     # user who uploaded a dataset version cannot also approve it. Default true;
     # enforced in the review workflow (Stage 5).
     enforce_upload_approval_segregation: bool = Field(default=True)
+    # Two-tier BRSR review: when true, a client reviewer approves each section
+    # internally before it goes to Deloitte for final approval.
+    brsr_internal_review_required: bool = Field(default=False)
 
     organization: Optional["Organization"] = Relationship(back_populates="companies")
     users: List["User"] = Relationship(back_populates="company")
@@ -49,10 +52,12 @@ class CompanyRead(CompanyBase):
     registration_date: Optional[date]
     created_at: datetime
     updated_at: datetime
+    brsr_internal_review_required: bool = False
 
 
 class CompanyUpdate(SQLModel):
     name: Optional[str] = None
+    brsr_internal_review_required: Optional[bool] = None
     industry: Optional[str] = None
     country: Optional[str] = None
     sector: Optional[str] = None
