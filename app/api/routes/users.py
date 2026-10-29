@@ -25,6 +25,7 @@ from app.core.pagination import Page, paginate_params
 from app.core.security import hash_password
 from app.core.tenancy import accessible_company_ids
 from app.services.audit import log_action
+from app.rbac import policy
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -106,19 +107,24 @@ def create_user(
         if data.get("portal_type") == "deloitte":
             data["organization_id"] = actor.organization_id
 
+    # The role is checked BEFORE anything is written: its scope must match the
+    # new user's portal, and a client administrator may only give client roles.
+    role = None
+    if user_in.role_code:
+        role = policy.get_role(session, user_in.role_code)
+        policy.check_role_for_portal(role, data.get("portal_type") or "client")
+        if actor.portal_type == "client" and role.scope != "client":
+            raise AppError("forbidden_role", "Client administrators can only assign client roles", 403, "role_code")
+
     user = User(**data, hashed_password=hash_password(user_in.password))
     session.add(user)
+    session.flush()
+    if role:
+        session.add(UserRole(user_id=user.id, role_id=role.id, company_id=user.company_id))
+    log_action(session, actor, "user.created", "user", user.id, None, company_id=user.company_id,
+               changes={"email": user.email, "portal_type": user.portal_type, "role": role.code if role else None})
     session.commit()
     session.refresh(user)
-
-    # RBAC role assignment (authoritative), if a role_code was provided.
-    if user_in.role_code:
-        role = session.exec(select(Role).where(Role.code == user_in.role_code)).first()
-        if not role:
-            raise AppError("invalid_role", f"Unknown role: {user_in.role_code}", 422, "role_code")
-        session.add(UserRole(user_id=user.id, role_id=role.id, company_id=user.company_id))
-        session.commit()
-
     return user
 
 
@@ -149,10 +155,22 @@ def update_user(
         raise NotFoundError("User not found")
     if actor.portal_type == "client" and user.company_id != actor.company_id:
         raise NotFoundError("User not found")
-    for field, value in user_in.model_dump(exclude_unset=True).items():
+    changes = user_in.model_dump(exclude_unset=True)
+    if changes.get("is_active") is False:
+        if user.id == actor.id:
+            raise AppError("self_deactivate", "You cannot deactivate your own account", 422)
+        policy.check_keeps_an_admin(session, user, losing_admin=True)
+    if "role" in changes and actor.portal_type == "client":
+        # The role text is only a display hint, but it must not claim a Deloitte role
+        hint = session.exec(select(Role).where(Role.code == changes["role"])).first()
+        if hint is not None and hint.scope != "client":
+            raise AppError("forbidden_role", "Client administrators can only assign client roles", 403, "role")
+    for field, value in changes.items():
         setattr(user, field, value)
     user.updated_at = datetime.utcnow()
     session.add(user)
+    if changes:
+        log_action(session, actor, "user.updated", "user", user.id, None, company_id=user.company_id, changes=changes)
     session.commit()
     session.refresh(user)
     return user
@@ -218,8 +236,11 @@ def deactivate_user(
         raise NotFoundError("User not found")
     if user.id == actor.id:
         raise AppError("self_deactivate", "You cannot deactivate your own account", 422)
+    policy.check_keeps_an_admin(session, user, losing_admin=True)
     user.is_active = False
     user.deleted_at = datetime.utcnow()
     session.add(user)
+    log_action(session, actor, "user.removed", "user", user.id, None, company_id=user.company_id,
+               changes={"email": user.email})
     session.commit()
     return {"ok": True, "id": user_id}

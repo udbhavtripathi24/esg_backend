@@ -27,3 +27,5 @@ from app.models.assurance import (  # noqa: F401
 from app.models.evidence import EvidenceFile  # noqa: F401
 # Surveys & assessments
 from app.models.survey import Survey, SurveyInvite, SurveyResponse, SurveyFile  # noqa: F401
+# Admin console
+from app.models.target import EsgTarget  # noqa: F401

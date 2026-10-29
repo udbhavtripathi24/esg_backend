@@ -41,6 +41,8 @@ from app.models.user import User as _User
 from app.models.company import Company
 from app.api.deps import require_permission
 from app.core.errors import NotFoundError, AppError
+from app.rbac import policy
+from app.services.audit import log_action
 
 
 class AssignRoleBody(BaseModel):
@@ -56,11 +58,12 @@ def assign_role(
     session: Session = Depends(get_session),
 ):
     user = session.get(_User, body.user_id)
-    if not user or user.deleted_at is not None:
-        raise NotFoundError("User not found")
-    role = session.exec(select(Role).where(Role.code == body.role_code)).first()
-    if not role:
-        raise AppError("invalid_role", f"Unknown role: {body.role_code}", 422, "role_code")
+    policy.check_target_visible(session, actor, user)
+    role = policy.get_role(session, body.role_code)
+    policy.check_can_grant(session, actor, user, role)
+    if actor.portal_type == "client" or user.portal_type == "client":
+        # Client roles are always scoped to the user's own company
+        body.company_id = user.company_id
     # Approved fix: reject a company_id outside the actor's own organization.
     # Mirrors the identical, already-tested pattern in
     # consultant_assignments.py's create_assignment(). Currently a
@@ -69,7 +72,7 @@ def assign_role(
     # user's own fixed User.company_id, so a cross-org row is inert today,
     # not actively exploitable) — but correct structural behavior and
     # hardens against future authorization-logic changes.
-    if body.company_id is not None:
+    if body.company_id is not None and actor.portal_type != "client":
         company = session.get(Company, body.company_id)
         if not company or company.organization_id != actor.organization_id:
             raise NotFoundError("Company not found")
@@ -83,6 +86,8 @@ def assign_role(
     if exists:
         raise AppError("duplicate_role", "User already has this role", 422)
     session.add(UserRole(user_id=body.user_id, role_id=role.id, company_id=body.company_id))
+    log_action(session, actor, "user.role_granted", "user", user.id, None, company_id=user.company_id,
+               changes={"role": role.code, "company_id": body.company_id})
     session.commit()
     return {"ok": True}
 
@@ -90,12 +95,19 @@ def assign_role(
 @router.delete("/assign")
 def remove_role(
     body: AssignRoleBody,
-    _actor: _User = Depends(require_permission("user:manage")),
+    actor: _User = Depends(require_permission("user:manage")),
     session: Session = Depends(get_session),
 ):
+    user = session.get(_User, body.user_id)
+    policy.check_target_visible(session, actor, user)
     role = session.exec(select(Role).where(Role.code == body.role_code)).first()
     if not role:
         raise NotFoundError("Role not found")
+    policy.check_can_grant(session, actor, user, role)
+    if actor.portal_type == "client":
+        body.company_id = user.company_id
+    if role.code == policy.CLIENT_ADMIN:
+        policy.check_keeps_an_admin(session, user, losing_admin=True)
     link = session.exec(
         select(UserRole).where(
             UserRole.user_id == body.user_id,
@@ -106,5 +118,7 @@ def remove_role(
     if not link:
         raise NotFoundError("Assignment not found")
     session.delete(link)
+    log_action(session, actor, "user.role_removed", "user", user.id, None, company_id=user.company_id,
+               changes={"role": role.code, "company_id": body.company_id})
     session.commit()
     return {"ok": True}

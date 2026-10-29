@@ -162,6 +162,8 @@ class AuditRead(BaseModel):
     request_id: Optional[str]
     changes: Optional[dict[str, Any]]
     occurred_at: datetime
+    actor_name: Optional[str] = None
+    company_name: Optional[str] = None
 
 
 @audit_router.get("", response_model=Page[AuditRead])
@@ -170,7 +172,11 @@ def list_audit(session: Session = Depends(get_session),
                page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
                entity_type: Optional[str] = None,
                entity_id: Optional[int] = None,
-               company_id: Optional[int] = None):
+               company_id: Optional[int] = None,
+               action: Optional[str] = Query(None, max_length=80, description="an action, a prefix ending in '.', or a prefix followed by '*'"),
+               actor_user_id: Optional[int] = None,
+               date_from: Optional[datetime] = None,
+               date_to: Optional[datetime] = None):
     page, page_size = paginate_params(page, page_size)
     stmt = select(AuditLog)
     # Tenant scoping: client users see only their company's logs
@@ -193,14 +199,58 @@ def list_audit(session: Session = Depends(get_session),
         stmt = stmt.where(AuditLog.entity_id == entity_id)
     if company_id is not None:
         stmt = stmt.where(AuditLog.company_id == company_id)
+    if action:
+        prefix = action[:-1] if action.endswith("*") else action if action.endswith(".") else None
+        stmt = stmt.where(AuditLog.action.startswith(prefix, autoescape=True) if prefix
+                          else AuditLog.action == action)
+    if actor_user_id is not None:
+        stmt = stmt.where(AuditLog.actor_user_id == actor_user_id)
+    if date_from is not None:
+        stmt = stmt.where(AuditLog.occurred_at >= date_from.replace(tzinfo=None))
+    if date_to is not None:
+        stmt = stmt.where(AuditLog.occurred_at <= date_to.replace(tzinfo=None))
     total = session.exec(select(func.count()).select_from(stmt.subquery())).one()
     stmt = stmt.order_by(AuditLog.occurred_at.desc()).offset((page - 1) * page_size).limit(page_size)
-    return Page(items=session.exec(stmt).all(), total=total, page=page, page_size=page_size)
+    rows = session.exec(stmt).all()
+    from app.models.company import Company
+    uids = {r.actor_user_id for r in rows if r.actor_user_id}
+    cids = {r.company_id for r in rows if r.company_id}
+    unames = {u.id: u.name for u in session.exec(select(User).where(User.id.in_(uids)))} if uids else {}
+    cnames = {c.id: c.name for c in session.exec(select(Company).where(Company.id.in_(cids)))} if cids else {}
+    items = [AuditRead(**r.model_dump(), actor_name=unames.get(r.actor_user_id),
+                       company_name=cnames.get(r.company_id)) for r in rows]
+    return Page(items=items, total=total, page=page, page_size=page_size)
 
 
 # ---------- Integrations (stub CRUD, no live sync) ----------
 
 integrations_router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+
+INTEGRATION_STATUSES = ("configured", "disabled", "error")
+# What the record may hold. Never credentials: when a live connector arrives,
+# secrets go to Secret Manager, not this table.
+CONFIG_TEXT = {"domain": 60, "system": 120, "frequency": 40, "owner": 120, "notes": 1000, "note": 1000,
+               "endpoint": 300}
+
+
+def _clean_config(cfg: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if cfg is None:
+        return None
+    out: dict[str, Any] = {}
+    for k, v in cfg.items():
+        if k in CONFIG_TEXT:
+            s = str(v or "").strip()[:CONFIG_TEXT[k]]
+            if s:
+                out[k] = s
+        elif k == "sheets":
+            from app.datasheets.catalog import SHEETS
+            if not isinstance(v, list) or any(x not in SHEETS for x in v):
+                raise AppError("invalid_sheets", "Unknown data sheet in the mapping", 422, "config")
+            out[k] = sorted(set(v))
+        else:
+            raise AppError("invalid_config", f"'{k}' can't be stored on an integration record", 422, "config")
+    return out
 
 
 class IntegrationCreate(BaseModel):
@@ -212,6 +262,7 @@ class IntegrationCreate(BaseModel):
 
 class IntegrationUpdate(BaseModel):
     status: Optional[str] = None
+    type: Optional[str] = None
     config: Optional[dict[str, Any]] = None
 
 
@@ -261,8 +312,12 @@ def create_integration(body: IntegrationCreate, request: Request,
         if not can_access_company(session, actor, body.company_id):
             raise NotFoundError("Company not found")
         company_id = body.company_id
-    integ = Integration(company_id=company_id, type=body.type, status=body.status,
-                        config=body.config)
+    if body.status not in INTEGRATION_STATUSES:
+        raise AppError("invalid_status", "Status must be configured, disabled or error", 422, "status")
+    if not body.type.strip():
+        raise AppError("type_required", "Name the system", 422, "type")
+    integ = Integration(company_id=company_id, type=body.type.strip()[:60], status=body.status,
+                        config=_clean_config(body.config))
     session.add(integ); session.flush()
     log_action(session, actor, "integration.created", "integration", integ.id,
                company_id=company_id, changes={"type": body.type},
@@ -279,6 +334,14 @@ def update_integration(integration_id: int, body: IntegrationUpdate, request: Re
     if not integ or not can_access_company(session, actor, integ.company_id):
         raise NotFoundError("Integration not found")
     changes = body.model_dump(exclude_unset=True)
+    if "status" in changes and changes["status"] not in INTEGRATION_STATUSES:
+        raise AppError("invalid_status", "Status must be configured, disabled or error", 422, "status")
+    if "type" in changes:
+        if not (changes["type"] or "").strip():
+            raise AppError("type_required", "Name the system", 422, "type")
+        changes["type"] = changes["type"].strip()[:60]
+    if "config" in changes:
+        changes["config"] = _clean_config(changes["config"])
     for k, v in changes.items():
         setattr(integ, k, v)
     integ.updated_at = datetime.utcnow()
